@@ -8,14 +8,19 @@
 //! a coloured circle, and after a couple of seconds of stillness one of them is
 //! chosen at random and its colour takes the screen. [`chooser`] is all of
 //! that behaviour, with no browser and no clock in it, so it can be tested
-//! exhaustively; [`ui`] is the thin web-sys layer that feeds it pointer events
-//! and draws what it decides.
+//! exhaustively; [`wheel`] is the spinning selection animation in the same
+//! style; [`ui`] is the thin web-sys layer that feeds it pointer events and draws
+//! what they decide.
+//!
+//! There is one job and one job only: several fingers in, exactly one finger
+//! chosen out. No modes, no teams, no multiple winners.
 //!
 //! There is no binary and no server. `cargo build` writes `dist/`, and that
 //! directory is the whole publishable artifact.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 pub mod chooser;
+pub mod wheel;
 
 #[cfg(target_arch = "wasm32")]
 mod ui;

@@ -22,8 +22,12 @@
 //!   present and nobody has been chosen yet.
 //! * A finger up (or a cancelled touch) removes that player and restarts the
 //!   timer, for the same reason.
-//! * When the timer runs out, one of the players present is chosen at random.
-//!   Choosing ends the draw: every other player leaves immediately.
+//! * Arming a draw also *picks* the winner, at random, there and then. The
+//!   spinning animation in [`crate::wheel`] is laid out to land on it, so the
+//!   result is fixed before anything is drawn and cannot be argued with on the
+//!   way there.
+//! * When the timer runs out the chosen player is committed and their colour
+//!   takes the screen; every other player leaves immediately.
 //! * Two seconds after the chosen finger lifts, the choice is cleared and a new
 //!   draw can start.
 
@@ -143,6 +147,17 @@ pub struct Chooser {
     chosen: Option<i32>,
     /// When the current draw window opened.
     draw_started_at: Option<f64>,
+    /// Which player the current draw will pick, decided when it was armed.
+    ///
+    /// Decided *before* the animation rather than at the end of it. The wheel
+    /// has to land on the winner, so the winner cannot be a consequence of where
+    /// the pointer stopped -- that would make the animation an input to its own
+    /// result. Fixing it up front also makes the fairness argument trivial: the
+    /// result is a random draw taken the instant the last finger settled, and
+    /// nothing that happens on the glass afterwards can move it.
+    ///
+    /// `None` when no draw window is running.
+    pending_winner: Option<usize>,
     /// When the chosen finger lifted, if it has.
     chosen_lifted_at: Option<f64>,
 }
@@ -178,6 +193,16 @@ impl Chooser {
         self.chosen.is_some()
     }
 
+    /// Which player the running draw will pick, as an index into [`Self::players`]
+    /// in the order they are returned.
+    ///
+    /// This is the wheel's destination: the spinning animation is laid out so
+    /// that this player ends up under the pointer. `None` when no draw window is
+    /// running.
+    pub fn pending_winner(&self) -> Option<usize> {
+        self.pending_winner
+    }
+
     /// When the current draw window opened, if one is running.
     ///
     /// The white arc on each player's ring is this timestamp's progress
@@ -208,7 +233,10 @@ impl Chooser {
     /// Ignored once someone has been chosen: the winner's screen is showing
     /// until that finger lifts and the app resets, and a new finger landing
     /// during it is not a player.
-    pub fn pointer_down(&mut self, id: i32, x: f64, y: f64, now: f64) {
+    ///
+    /// `winner` is a random index used only if this event arms a draw, and is
+    /// reduced against the player count, so the caller may pass a raw draw.
+    pub fn pointer_down(&mut self, id: i32, x: f64, y: f64, now: f64, winner: usize) {
         if self.chosen.is_some() {
             return;
         }
@@ -221,7 +249,7 @@ impl Chooser {
                 chosen_at: None,
             },
         );
-        self.restart_draw(now);
+        self.restart_draw(now, winner);
     }
 
     /// A finger moved to `(x, y)`.
@@ -239,7 +267,10 @@ impl Chooser {
     ///
     /// Both mean the same thing to a finger chooser, and the original treated
     /// them identically, so they are one function.
-    pub fn pointer_up(&mut self, id: i32, now: f64) {
+    ///
+    /// `winner` is as in [`Self::pointer_down`]: a fresh random index, used only
+    /// if this lifts a draw arming. Lifting the winner does not consume it.
+    pub fn pointer_up(&mut self, id: i32, now: f64, winner: usize) {
         if self.chosen == Some(id) {
             // The winner is leaving. Everyone else was already cleared at the
             // draw, and this finger stays put as a marker so the filled screen
@@ -252,24 +283,29 @@ impl Chooser {
         if self.players.remove(&id).is_none() {
             return;
         }
-        self.restart_draw(now);
+        self.restart_draw(now, winner);
     }
 
-    /// A draw window has elapsed: choose one of the players present, at random.
+    /// The draw window has elapsed: commit the winner and begin the reveal.
     ///
-    /// Returns the winner's pointer id. Every other player leaves at once --
-    /// their fingers are still down, but their circles are gone, because the
-    /// original cleared the map around the winner and so did this.
-    pub fn draw(&mut self, now: f64, winner: usize) -> Option<i32> {
+    /// The winner was chosen when the window was armed, not here -- see
+    /// [`Self::pending_winner`]. This only carries that decision through: the
+    /// winner's circle starts expanding at `now` and every other player leaves.
+    /// Their fingers are still down; their circles are gone.
+    ///
+    /// Returns the winner's pointer id.
+    pub fn draw(&mut self, now: f64) -> Option<i32> {
         // A draw needs two players and an unclaimed app, whatever the timer
         // thought it was doing.
         if self.players.len() < REQUIRED_PLAYER_COUNT || self.chosen.is_some() {
             return None;
         }
-        // `winner` is a caller-supplied index so that a test can pin the
-        // randomness and assert on the result. It is reduced here, so the
-        // browser may pass `random_index()` raw.
-        let index = winner % self.players.len();
+        // Taken from the armed draw, and reduced against the players *now*
+        // present. The count cannot have changed without the window being
+        // re-armed, so this cannot index out of range -- but reducing here means
+        // a stale index would pick the wrong player rather than panic, and the
+        // window is re-armed on every change, so it cannot be stale either.
+        let index = (self.pending_winner?) % self.players.len();
         let id = *self.players.keys().nth(index)?;
         if let Some(player) = self.players.get_mut(&id) {
             player.chosen_at = Some(now);
@@ -279,6 +315,7 @@ impl Chooser {
         // The window is over: this flag, not the winner, is what stops a
         // pointer event arriving in the same frame from starting another draw.
         self.draw_started_at = None;
+        self.pending_winner = None;
         Some(id)
     }
 
@@ -301,7 +338,13 @@ impl Chooser {
         self.chosen = None;
         self.chosen_lifted_at = None;
         self.draw_started_at = None;
+        self.pending_winner = None;
         true
+    }
+
+    /// When the chosen player was chosen, if one has been.
+    pub fn chosen_at(&self, now: f64) -> Option<f64> {
+        self.chosen()?.chosen_at.or(Some(now))
     }
 
     /// How far the winner's circle has grown at `timestamp`, 0 to 1.
@@ -342,8 +385,14 @@ impl Chooser {
     /// moving a finger off the table restarts the window: a draw is against
     /// the players present *now*, and the last change to that set is when it
     /// must begin counting.
-    fn restart_draw(&mut self, now: f64) {
-        self.draw_started_at = if self.can_draw() { Some(now) } else { None };
+    fn restart_draw(&mut self, now: f64, winner: usize) {
+        if self.can_draw() {
+            self.draw_started_at = Some(now);
+            self.pending_winner = Some(winner % self.players.len());
+        } else {
+            self.draw_started_at = None;
+            self.pending_winner = None;
+        }
     }
 }
 
@@ -351,18 +400,29 @@ impl Chooser {
 mod tests {
     use super::*;
 
+    /// Two fingers down and a draw armed, with `winner` as the pending player.
+    ///
+    /// The two-step matters: arming picks the winner, committing announces it.
+    /// A test that only cares about the result can use this and ignore the split.
+    fn armed(winner: usize) -> Chooser {
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 100.0, 200.0, 0.0, winner);
+        chooser.pointer_down(2, 300.0, 400.0, 10.0, winner);
+        chooser
+    }
+
     /// A chooser with two fingers down, mid-draw.
     fn drawing() -> Chooser {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 100.0, 200.0, 0.0);
-        chooser.pointer_down(2, 300.0, 400.0, 10.0);
+        chooser.pointer_down(1, 100.0, 200.0, 0.0, 0);
+        chooser.pointer_down(2, 300.0, 400.0, 10.0, 1);
         chooser
     }
 
     #[test]
     fn a_finger_down_is_a_player_at_that_point() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(7, 12.5, 34.0, 0.0);
+        chooser.pointer_down(7, 12.5, 34.0, 0.0, 0);
 
         let player = chooser.players().next().expect("one player");
         assert_eq!(player.id, 7);
@@ -395,7 +455,7 @@ mod tests {
     #[test]
     fn a_finger_up_takes_the_player_away() {
         let mut chooser = drawing();
-        chooser.pointer_up(1, 100.0);
+        chooser.pointer_up(1, 100.0, 0);
 
         assert_eq!(chooser.len(), 1);
         assert!(chooser.players().all(|player| player.id != 1));
@@ -407,7 +467,7 @@ mod tests {
         // `pointer_up` is the whole of lift-and-cancel handling: the original
         // bound both `pointerup` and `pointercancel` to it.
         let mut chooser = drawing();
-        chooser.pointer_up(2, 100.0);
+        chooser.pointer_up(2, 100.0, 0);
 
         assert_eq!(chooser.len(), 1);
         assert!(chooser.players().all(|player| player.id != 2));
@@ -416,19 +476,19 @@ mod tests {
     #[test]
     fn one_finger_is_not_a_draw() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
 
         assert_eq!(chooser.len(), REQUIRED_PLAYER_COUNT - 1);
         assert!(!chooser.is_drawing(), "a draw needs two players");
         assert!(chooser.draw_progress(0.0).is_none(), "and so no arc");
-        assert_eq!(chooser.draw(2500.0, 0), None, "and no winner");
+        assert_eq!(chooser.draw(2500.0), None, "and no winner");
     }
 
     #[test]
     fn a_second_finger_starts_the_draw() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 50.0, 50.0, 40.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
+        chooser.pointer_down(2, 50.0, 50.0, 40.0, 1);
 
         assert!(chooser.is_drawing());
         assert_eq!(chooser.draw_started_at(), Some(40.0));
@@ -439,7 +499,7 @@ mod tests {
     #[test]
     fn a_third_finger_restarts_the_draw() {
         let mut chooser = drawing();
-        chooser.pointer_down(3, 10.0, 10.0, 500.0);
+        chooser.pointer_down(3, 10.0, 10.0, 500.0, 0);
 
         // The window counts from the latest change to who is on the glass, so
         // the last finger down gets the whole window.
@@ -449,7 +509,7 @@ mod tests {
     #[test]
     fn a_finger_up_restarts_the_draw() {
         let mut chooser = drawing();
-        chooser.pointer_up(1, 100.0);
+        chooser.pointer_up(1, 100.0, 0);
 
         assert_eq!(chooser.len(), 1);
         assert!(
@@ -458,7 +518,7 @@ mod tests {
         );
 
         // Put the finger back and the window starts again from now.
-        chooser.pointer_down(1, 100.0, 200.0, 200.0);
+        chooser.pointer_down(1, 100.0, 200.0, 200.0, 0);
         assert_eq!(chooser.draw_started_at(), Some(200.0));
     }
 
@@ -470,33 +530,21 @@ mod tests {
     }
 
     #[test]
-    fn the_draw_chooses_one_of_the_players_present() {
-        for winner in 0..3 {
-            let mut chooser = drawing();
-            let chosen = chooser
-                .draw(2500.0, winner)
-                .expect("two players, so a winner");
+    fn the_draw_announces_a_player_that_was_present() {
+        for winner in 0..2 {
+            let mut chooser = armed(winner);
+            let chosen = chooser.draw(2500.0).expect("two players, so a winner");
 
-            assert!([1, 2].contains(&chosen), "picked from the players");
+            assert!(chosen == 1 || chosen == 2, "picked from the players");
             assert_eq!(chooser.len(), 1, "the others left");
             assert_eq!(chooser.chosen().map(|player| player.id), Some(chosen));
         }
     }
 
     #[test]
-    fn every_player_can_win() {
-        // The draw is random, but it must be *possible* for every finger on the
-        // glass to be the one that wins.
-        for index in 0..2 {
-            let mut chooser = drawing();
-            assert_eq!(chooser.draw(2500.0, index), Some(index as i32 + 1));
-        }
-    }
-
-    #[test]
     fn the_winner_is_anchored_to_the_instant_of_the_draw() {
-        let mut chooser = drawing();
-        chooser.draw(2500.0, 0);
+        let mut chooser = armed(0);
+        chooser.draw(2500.0);
 
         // A later frame must not restart the expansion.
         assert_eq!(chooser.chosen_progress(2500.0), Some(0.0));
@@ -509,25 +557,25 @@ mod tests {
 
     #[test]
     fn the_winner_survives_lifting_and_a_new_finger_lands_nowhere() {
-        let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let mut chooser = armed(0);
+        let winner = chooser.draw(2500.0).expect("a winner");
 
-        chooser.pointer_up(winner, 3000.0);
+        chooser.pointer_up(winner, 3000.0, 0);
         assert_eq!(chooser.len(), 1, "the winner's circle stays put");
         assert_eq!(chooser.chosen().map(|p| p.id), Some(winner));
 
         // The app is not reset yet, so a new finger is not a player.
-        chooser.pointer_down(9, 10.0, 10.0, 3100.0);
+        chooser.pointer_down(9, 10.0, 10.0, 3100.0, 0);
         assert_eq!(chooser.len(), 1);
         assert!(!chooser.is_drawing());
     }
 
     #[test]
     fn the_reset_comes_exactly_two_seconds_after_the_winner_lifts() {
-        let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let mut chooser = armed(0);
+        let winner = chooser.draw(2500.0).expect("a winner");
 
-        chooser.pointer_up(winner, 3000.0);
+        chooser.pointer_up(winner, 3000.0, 0);
         assert!(!chooser.tick(3000.0 + RESTART_DELAY - 1.0), "not yet");
         assert!(
             chooser.tick(3000.0 + RESTART_DELAY),
@@ -539,29 +587,29 @@ mod tests {
 
     #[test]
     fn a_reset_chooser_can_draw_again() {
-        let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
-        chooser.pointer_up(winner, 3000.0);
+        let mut chooser = armed(0);
+        let winner = chooser.draw(2500.0).expect("a winner");
+        chooser.pointer_up(winner, 3000.0, 0);
         chooser.tick(3000.0 + RESTART_DELAY + 1.0);
 
-        chooser.pointer_down(4, 5.0, 5.0, 6000.0);
-        chooser.pointer_down(5, 6.0, 6.0, 6100.0);
+        chooser.pointer_down(4, 5.0, 5.0, 6000.0, 0);
+        chooser.pointer_down(5, 6.0, 6.0, 6100.0, 1);
 
         assert!(chooser.is_drawing(), "the app is reusable after a reset");
         assert!(chooser.chosen().is_none());
-        assert_eq!(chooser.draw(8600.0, 1), Some(5));
+        assert_eq!(chooser.draw(8600.0), Some(5));
     }
 
     #[test]
     fn a_winner_held_down_does_not_reset_the_app() {
-        let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let mut chooser = armed(0);
+        let winner = chooser.draw(2500.0).expect("a winner");
 
         // Still holding the winner: there is no "lifted" moment, so no reset,
         // however long the page is left alone.
         assert!(!chooser.tick(1_000_000.0));
         assert!(chooser.is_chosen());
-        chooser.pointer_up(winner, 1_000_000.0);
+        chooser.pointer_up(winner, 1_000_000.0, 0);
         assert!(!chooser.tick(1_000_000.0 + RESTART_DELAY - 1.0));
         assert!(chooser.tick(1_000_000.0 + RESTART_DELAY + 1.0));
     }
@@ -569,9 +617,9 @@ mod tests {
     #[test]
     fn a_draw_while_a_winner_is_showing_does_nothing() {
         let mut chooser = drawing();
-        chooser.draw(2500.0, 0);
+        chooser.draw(2500.0);
 
-        assert_eq!(chooser.draw(3000.0, 1), None);
+        assert_eq!(chooser.draw(3000.0), None);
         assert_eq!(chooser.len(), 1, "still one player");
         assert!(chooser.is_chosen(), "still chosen");
     }
@@ -579,7 +627,7 @@ mod tests {
     #[test]
     fn a_lift_of_a_pointer_that_is_not_down_does_nothing() {
         let mut chooser = drawing();
-        chooser.pointer_up(42, 100.0);
+        chooser.pointer_up(42, 100.0, 0);
 
         assert_eq!(chooser.len(), 2);
         // And it did not count as a change to the players, so the window the
@@ -590,9 +638,9 @@ mod tests {
     #[test]
     fn a_draw_with_one_player_does_nothing() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
 
-        assert_eq!(chooser.draw(2500.0, 0), None);
+        assert_eq!(chooser.draw(2500.0), None);
         assert!(!chooser.is_chosen());
     }
 
@@ -600,8 +648,8 @@ mod tests {
     fn the_winner_index_is_taken_against_the_players_actually_present() {
         // Indices come from a random draw, so a caller may pass anything; an
         // out-of-range index must still name a real player.
-        let mut chooser = drawing();
-        assert_eq!(chooser.draw(2500.0, 17), Some(2), "17 % 2 == 1");
+        let mut chooser = armed(17);
+        assert_eq!(chooser.draw(2500.0), Some(2), "17 % 2 == 1");
     }
 
     #[test]
@@ -691,8 +739,8 @@ mod tests {
 
     #[test]
     fn the_winner_radius_starts_off_screen_and_settles_at_the_minimum() {
-        let mut chooser = drawing();
-        chooser.draw(0.0, 0);
+        let mut chooser = armed(0);
+        chooser.draw(0.0);
 
         let (width, height) = (800.0, 1600.0);
         assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
@@ -711,8 +759,8 @@ mod tests {
     fn the_winner_radius_never_collapses_on_a_tiny_screen() {
         // The starting radius is at least `MIN_WINNER_RADIUS`, so a very small
         // viewport does not make the circle shrink as it grows in.
-        let mut chooser = drawing();
-        chooser.draw(0.0, 0);
+        let mut chooser = armed(0);
+        chooser.draw(0.0);
         assert_eq!(
             chooser.chosen_radius(0.0, 10.0, 10.0),
             Some(MIN_WINNER_RADIUS)
@@ -766,10 +814,10 @@ mod tests {
         // which index it passes in.
         fn run() -> Chooser {
             let mut chooser = Chooser::new();
-            chooser.pointer_down(3, 1.0, 2.0, 0.0);
-            chooser.pointer_down(1, 3.0, 4.0, 0.0);
+            chooser.pointer_down(3, 1.0, 2.0, 0.0, 0);
+            chooser.pointer_down(1, 3.0, 4.0, 0.0, 1);
             chooser.pointer_move(3, 9.0, 9.0);
-            chooser.draw(DRAWING_TIME_MS, 1);
+            chooser.draw(DRAWING_TIME_MS);
             chooser
         }
         assert_eq!(run(), run());

@@ -21,6 +21,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::Event;
 
 use crate::chooser::{self, Chooser, Player};
+use crate::wheel;
 
 /// A full turn of the circle, and the arc every stroke sweeps.
 const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
@@ -42,6 +43,25 @@ struct App {
     /// `performance.now()` at the first frame, which anchors the pulse so every
     /// circle breathes in step.
     start_time: f64,
+    /// When the last draw was won, and by whom, for as long as the winner's
+    /// colour is on screen.
+    ///
+    /// A separate record rather than the chooser's own winner, because the
+    /// chooser forgets a player the instant their finger lifts -- and the colour
+    /// that floods the screen has to stay that colour and stay centred on where
+    /// that finger *was*, for the full second and a bit that the reveal lasts.
+    /// Without this the circle would re-centre on the last finger position
+    /// recorded, or vanish mid-reveal.
+    last_winner: Option<Winner>,
+}
+
+/// A won draw, kept after the finger has gone.
+#[derive(Debug, Clone, Copy)]
+struct Winner {
+    id: i32,
+    x: f64,
+    y: f64,
+    at: f64,
 }
 
 /// The animation-frame closure.
@@ -85,6 +105,7 @@ fn run() -> Result<(), JsValue> {
     let app = Rc::new(RefCell::new(App {
         chooser: Chooser::new(),
         start_time: now(),
+        last_winner: None,
     }));
 
     listen(&window, "resize", {
@@ -103,7 +124,8 @@ fn run() -> Result<(), JsValue> {
             let event: web_sys::PointerEvent = event.dyn_into()?;
             let (id, x, y) = at(&event);
             let count = borrow(&app, |app| {
-                app.chooser.pointer_down(id, x, y, now());
+                app.chooser
+                    .pointer_down(id, x, y, now(), random_index(16));
                 app.chooser.len()
             });
             announce_players(count);
@@ -127,7 +149,8 @@ fn run() -> Result<(), JsValue> {
             move |event| {
                 let event: web_sys::PointerEvent = event.dyn_into()?;
                 let count = borrow(&app, |app| {
-                    app.chooser.pointer_up(event.pointer_id(), now());
+                    app.chooser
+                        .pointer_up(event.pointer_id(), now(), random_index(16));
                     app.chooser.len()
                 });
                 announce_players(count);
@@ -147,8 +170,24 @@ fn run() -> Result<(), JsValue> {
     })?;
 
     register_service_worker();
+    // Rust has started and has a canvas to draw into, so the splash has done its
+    // job. Removed here rather than left to fade, because a fade would leave it
+    // over the canvas swallowing touches for as long as it ran -- and the whole
+    // app is people slapping a phone.
+    drop_splash();
+    status("Put two or more fingers on the screen.");
     start_loop(Rc::clone(&app), canvas, context);
     Ok(())
+}
+
+/// Take the splash off the screen.
+///
+/// The shell also schedules a fallback for the case where the app never starts at
+/// all; this is the normal path, and it happens before the first frame.
+fn drop_splash() {
+    if let Ok(splash) = element::<web_sys::HtmlElement>("splash") {
+        splash.remove()
+    }
 }
 
 /// Start the one animation-frame loop that draws everything.
@@ -193,15 +232,22 @@ fn schedule(frame: &Rc<Frame>) {
 
 /// Draw one frame. Returns the winner, if this frame drew one.
 ///
-/// Two things happen here that have no event of their own, because both are
-/// *time passing* rather than something a finger did, and this loop already
+/// Three things happen here that have no event of their own, because all three
+/// are *time passing* rather than something a finger did, and this loop already
 /// runs on a clock:
 ///
 /// * the reset, due two seconds after the winner lifts;
 /// * the draw itself, due `DRAWING_TIME_MS` after the last change to who is on
 ///   the glass. Running it here rather than in a `setTimeout` means the winner
 ///   and the frame that shows the winner are the same instant, and a frame that
-///   arrives late draws a late winner instead of a stale one.
+///   arrives late draws a late winner instead of a stale one;
+/// * the haptics, on the one frame the winner is announced.
+///
+/// The winner is committed here, at the end of the window, and the spinning
+/// animation before it was laid out to land on the player already chosen in
+/// [`Chooser::pending_winner`] -- so the animation reveals a result rather than
+/// producing one, and a finger landing or lifting mid-spin cannot change who
+/// wins.
 fn render(
     app: &Rc<RefCell<App>>,
     canvas: &web_sys::HtmlCanvasElement,
@@ -218,22 +264,52 @@ fn render(
                 // The number of players is read before the draw, because the
                 // draw removes all but the winner.
                 let of = app.chooser.len();
-                if let Some(winner) = app.chooser.draw(timestamp, random_index(of)) {
+                if let Some(winner) = app.chooser.draw(timestamp) {
+                    // The one moment the whole app is about, so the one moment it
+                    // speaks: a buzz, for whoever is not looking at the screen.
+                    buzz();
+                    // The chooser keeps only the winner now; where they were and
+                    // when is the reveal's business, so it is recorded here.
+                    let won = app.chooser.chosen().map(|player| Winner {
+                        id: player.id,
+                        x: player.x,
+                        y: player.y,
+                        at: timestamp,
+                    });
+                    app.last_winner = won;
                     announced = Some((winner, of));
                 }
             }
         }
 
         let start_time = app.start_time;
-        paint(&app.chooser, canvas, context, timestamp, start_time);
+        let last_winner = app.last_winner;
+        paint(
+            &app.chooser,
+            last_winner,
+            canvas,
+            context,
+            timestamp,
+            start_time,
+        );
         announced
     })
 }
 
-/// Draw the whole screen: the winner's fill if there is a winner, every player
-/// otherwise.
+/// Draw the whole screen.
+///
+/// Three states, in the order the eye meets them:
+///
+/// * **nothing yet** -- the hint, so the first finger has something to arrive at;
+/// * **drawing** -- the players on the wheel, spinning, with the white arc
+///   closing on each of them;
+/// * **won** -- the winner's colour flooding the screen.
+///
+/// The reveal reads from [`App::last_winner`] rather than the chooser's live
+/// winner, so it keeps its position and colour after the winning finger lifts.
 fn paint(
     app: &Chooser,
+    last_winner: Option<Winner>,
     canvas: &web_sys::HtmlCanvasElement,
     context: &web_sys::CanvasRenderingContext2d,
     timestamp: f64,
@@ -244,41 +320,248 @@ fn paint(
 
     let pulse = chooser::pulse_scale(timestamp, start_time);
 
+    // The reveal: a colour flooding the screen from the winner's circle, and the
+    // winner still visible inside it as a hole.
+    if let Some(winner) = last_winner.filter(|_| app.chosen().is_some()) {
+        draw_reveal(context, &winner, app, width, height, timestamp, pulse);
+        return;
+    }
     if let Some(winner) = app.chosen() {
-        if let Some(radius) = app.chosen_radius(timestamp, width, height) {
-            // A rectangle and a circle in one path, filled even-odd: the circle
-            // is a hole in the colour that floods the screen, so the winner
-            // stays visible after the fill has finished. The radius the
-            // chooser returns is what leaves the winner's own ring showing
-            // through it.
-            match web_sys::Path2d::new() {
-                Ok(path) => {
-                    path.rect(0.0, 0.0, width, height);
-                    if path
-                        .arc(winner.x, winner.y, radius, 0.0, TWO_PI)
-                        .is_ok()
-                    {
-                        context.set_fill_style_str(&winner.color_of());
-                        context.fill_with_path_2d_and_winding(
-                            &path,
-                            web_sys::CanvasWindingRule::Evenodd,
-                        );
-                    }
-                }
-                Err(error) => show_failure(&describe(&error)),
-            }
-        }
-        // The winner alone, at full pulse, and never a loading arc: the draw is
-        // over, and the arc sweeping the rest of its ring would read as a
-        // second, still-running draw.
-        draw_player(context, winner, pulse, 1.0);
+        let won = Winner {
+            id: winner.id,
+            x: winner.x,
+            y: winner.y,
+            at: app.chosen_at(timestamp).unwrap_or(timestamp),
+        };
+        draw_reveal(context, &won, app, width, height, timestamp, pulse);
         return;
     }
 
-    let progress = app.draw_progress(timestamp).unwrap_or(0.0);
-    for player in app.players() {
-        draw_player(context, player, pulse, progress);
+    let players: Vec<(i32, f64, f64)> = app.players().map(|p| (p.id, p.x, p.y)).collect();
+
+    // Fewer than two fingers: there is nothing to choose between, so say what
+    // the app wants rather than showing an empty screen.
+    if players.len() < chooser::REQUIRED_PLAYER_COUNT {
+        draw_hint(context, players.len(), width, height, pulse);
+        for (id, x, y) in &players {
+            let here = Player {
+                id: *id,
+                x: *x,
+                y: *y,
+                chosen_at: None,
+            };
+            draw_player(context, &here, pulse, 0.0);
+        }
+        return;
     }
+
+    // Drawing. The wheel is a function of the players and the clock alone, so it
+    // needs no state: the same hands on the glass and the same millisecond always
+    // give the same wheel, which is what lets it stay in step while fingers move
+    // underneath it.
+    let window = chooser::DRAWING_TIME_MS;
+    let elapsed = timestamp - app.draw_started_at().unwrap_or(timestamp);
+    let spin = wheel::spin_progress(elapsed, window);
+    let slots = wheel::slots(&players, spin, width, height);
+    let arc = app.draw_progress(timestamp).unwrap_or(0.0);
+
+    // Faint spokes first, so the circles sit on something. This is the one piece
+    // of chrome the app has ever had, and it earns its place: without it the
+    // circles drift together mid-spin and the eye loses track of which is which.
+    draw_spokes(context, &players, &slots);
+
+    for (index, (id, _, _)) in players.iter().enumerate() {
+        let slot = slots[index];
+        let landing = app.pending_winner() == Some(index);
+        let here = Player {
+            id: *id,
+            x: slot.x,
+            y: slot.y,
+            chosen_at: None,
+        };
+        draw_player(
+            context,
+            &here,
+            // The winner's circle grows slightly as the pointer closes on it, so
+            // the eye is pulled to the right place before the result is announced.
+            pulse * if landing { landing_grow(spin) } else { 1.0 },
+            arc,
+        );
+    }
+
+    draw_pointer(context, &players, &slots, elapsed, window, width, height);
+}
+
+/// The winner's colour taking the screen, with the winner as a hole in it.
+fn draw_reveal(
+    context: &web_sys::CanvasRenderingContext2d,
+    winner: &Winner,
+    app: &Chooser,
+    width: f64,
+    height: f64,
+    timestamp: f64,
+    pulse: f64,
+) {
+    let progress = app
+        .chosen_progress(timestamp)
+        .or_else(|| {
+            Some(
+                ((timestamp - winner.at) / chooser::CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0),
+            )
+        })
+        .unwrap_or(1.0);
+    // The same radius curve as the original: from off-screen down to just
+    // clearing the winner's own ring.
+    let from = width.max(height).max(chooser::MIN_WINNER_RADIUS);
+    let radius = progress * chooser::MIN_WINNER_RADIUS + (1.0 - progress) * from;
+
+    match web_sys::Path2d::new() {
+        Ok(path) => {
+            path.rect(0.0, 0.0, width, height);
+            if path.arc(winner.x, winner.y, radius, 0.0, TWO_PI).is_ok() {
+                context.set_fill_style_str(&Player::color(winner.id));
+                context.fill_with_path_2d_and_winding(&path, web_sys::CanvasWindingRule::Evenodd);
+            }
+        }
+        Err(error) => show_failure(&describe(&error)),
+    }
+    // The winner alone, at full pulse, and never a loading arc: the draw is over,
+    // and an arc sweeping its ring would read as a second, still-running draw.
+    let here = Player { id: winner.id, x: winner.x, y: winner.y, chosen_at: None };
+    draw_player(
+        context,
+        &here,
+        pulse,
+        1.0,
+    );
+}
+
+/// How much larger the landing player's circle is at the end of the spin.
+///
+/// Only in the last stretch, and only by a little: enough to pull the eye, not
+/// so much that it looks like a second highlight. Eased out, so it grows with the
+/// pointer's own deceleration rather than against it.
+fn landing_grow(spin: f64) -> f64 {
+    const MAX: f64 = 1.12;
+    ((spin - 0.7) / 0.3).clamp(0.0, 1.0).powi(2) * (MAX - 1.0) + 1.0
+}
+
+/// The faint lines from the centre to each circle.
+///
+/// `alpha` is deliberately low and the width hairline: this is a hint that the
+/// circles are in a wheel, not decoration, and anything stronger competes with
+/// the colours it is meant to organise.
+fn draw_spokes(
+    context: &web_sys::CanvasRenderingContext2d,
+    players: &[(i32, f64, f64)],
+    slots: &[wheel::Slot],
+) {
+    context.save();
+    context.set_line_width(1.0);
+    context.set_stroke_style_str("rgba(255, 255, 255, 0.10)");
+    for ((_, px, py), slot) in players.iter().zip(slots) {
+        let (slot_x, slot_y) = (slot.x, slot.y);
+        // From the circle to where it is going, not to the centre: a spoke to the
+        // centre under a circle on the ring would be entirely hidden.
+        let (dx, dy) = (slot_x - px, slot_y - py);
+        let length = dx.hypot(dy);
+        if length < 1.0 {
+            continue;
+        }
+        context.begin_path();
+        context.move_to(px + dx * 0.35, py + dy * 0.35);
+        context.line_to(slot_x - dx / length * 8.0, slot_y - dy / length * 8.0);
+        context.stroke()
+    }
+    context.restore();
+}
+
+/// The pointer sweeping the wheel.
+///
+/// A single small white dot riding the ring, which is all it needs to be: the
+/// wheel's own rotation is the spectacle, and a pointer that drew attention to
+/// itself would compete with the landing.
+fn draw_pointer(
+    context: &web_sys::CanvasRenderingContext2d,
+    players: &[(i32, f64, f64)],
+    slots: &[wheel::Slot],
+    elapsed: f64,
+    window: f64,
+    width: f64,
+    height: f64,
+) {
+    let Some(landed) = wheel::landed_on(slots, elapsed, window) else {
+        return;
+    };
+    let colour = Player::color(players[landed].0);
+    let (px, py) = wheel::pointer_position(elapsed, window, width, height);
+
+    // The landing player's colour as a halo, so the dot is legible over a circle
+    // of the same colour and does not vanish into it.
+    context.begin_path();
+    let _ = context.arc(px, py, 16.0, 0.0, TWO_PI);
+    context.set_fill_style_str("rgba(0, 0, 0, 0.55)");
+    context.fill();
+
+    context.begin_path();
+    let _ = context.arc(px, py, 9.0, 0.0, TWO_PI);
+    context.set_fill_style_str("#ffffff");
+    context.fill();
+
+    // And a thin ring in the winner's colour just inside it, which is the moment
+    // the eye reads as "this one" rather than "a dot stopped somewhere".
+    context.begin_path();
+    let _ = context.arc(px, py, 22.0, 0.0, TWO_PI);
+    context.set_line_width(3.0);
+    context.set_fill_style_str(&colour);
+    context.set_stroke_style_str(&colour);
+    context.stroke()
+}
+
+/// The prompt, when there is nothing to choose between yet.
+///
+/// One finger gets a different prompt from none: "one more" is more use to
+/// someone mid-gesture than the general instruction, and it is the only time the
+/// app knows how close it is to being ready.
+fn draw_hint(
+    context: &web_sys::CanvasRenderingContext2d,
+    players: usize,
+    width: f64,
+    height: f64,
+    pulse: f64,
+) {
+    let (text, size) = if players == 0 {
+        ("Put two or more fingers on the screen", 0.042)
+    } else {
+        ("One more finger", 0.052)
+    };
+    let font_px = (width.min(height) * size).round().max(16.0);
+    context.save();
+    context.set_font(&format!(
+        "500 {font_px}px system-ui, -apple-system, 'Segoe UI', sans-serif"
+    ));
+    context.set_text_align("center");
+    context.set_text_baseline("middle");
+
+    let cx = width / 2.0;
+    let cy = height / 2.0;
+    // A slow breath on the prompt as well, so the empty screen is not dead: the
+    // same 1500ms as the circles, so the whole screen breathes as one thing.
+    let breathe = 1.0 + 0.04 * (pulse - 1.0) / chooser::MAX_PULSE_SCALE;
+    let _ = context.translate(cx, cy);
+    let _ = context.scale(breathe, breathe);
+    context.set_global_alpha(0.55);
+
+    // Outlined, then filled. A single line of text on a black screen has nothing
+    // behind it, and a circle can end up under the words when two fingers land
+    // close together; a few pixels of the page's own black keeps it readable
+    // without a box, which would be far too heavy on an empty screen.
+    context.set_line_width(5.0);
+    context.set_stroke_style_str("rgba(0, 0, 0, 0.85)");
+    let _ = context.stroke_text(text, 0.0, 0.0);
+    context.set_fill_style_str("#ffffff");
+    let _ = context.fill_text(text, 0.0, 0.0);
+    context.restore();
 }
 
 /// One player: a filled inner disc, a ring around it, and the white arc that
@@ -582,6 +865,26 @@ fn announce_winner(winner: i32, of: usize) {
         winner_position(winner)
     ));
 }
+
+/// Buzz once when a winner is announced.
+///
+/// The native Chwazi app vibrates here, and it is worth keeping: the phone is in
+/// somebody's hand and being passed around a table, so the buzz is the one piece
+/// of the result that reaches the person who is not looking at the screen -- the
+/// one who has to go first.
+///
+/// One short pulse, not a pattern: a pattern would read as an app being chatty
+/// rather than a result being announced, and the screen already says what
+/// happened.
+fn buzz() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    window.navigator().vibrate_with_duration(WINNER_BUZZ_MS);
+}
+
+/// How long the winner's buzz lasts, in milliseconds.
+const WINNER_BUZZ_MS: u32 = 40;
 
 /// The winner's ordinal among the players it chose from.
 ///

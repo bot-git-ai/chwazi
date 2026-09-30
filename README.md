@@ -37,21 +37,31 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 ```
 
-40 tests, no browser: 28 over the pointer state machine in `src/chooser.rs` and 12
-over the committed shell in `tests/shell.rs`.
+69 tests, no browser: 29 over the pointer state machine in `src/chooser.rs`, 22
+over the spin in `src/wheel.rs`, and 18 over the committed shell in
+`tests/shell.rs`.
 
 ## How it works
 
 Each finger down becomes a player, drawn as a filled disc inside a ring, pulsing
 between 0.875× and 1.125× its size, in a colour spread around the hue wheel by
-`hsl(pointerId * 223 + 263, 100%, 40%)`. A white arc sweeps each ring while a draw
-runs. Two or more players and 2500ms of stillness choose one at random; its colour
-expands from its circle to fill the screen, leaving the winner visible as a hole
-in the colour, and two seconds after the winner lifts the app is ready again.
+`hsl(pointerId * 223 + 263, 100%, 40%)`.
 
-`src/chooser.rs` is all of that, with no DOM and no clock, which is why it can be
-tested exhaustively. `src/ui.rs` is the thin browser layer around it. See
-[AGENTS.md](AGENTS.md) for the details and the two subtleties of the original.
+Once two or more are down they gather into a wheel and a white arc closes around
+each of them, and then the wheel spins — 2.6 turns, fast at first, easing to a
+stop on one finger over the first 2000ms of the 2500ms window. A result that lands
+in front of everyone cannot be argued with. The winner is picked the instant the
+last finger settles, not by the animation, so nothing that happens on screen can
+change who wins; the spin is there to show you, not to decide. Then its colour
+expands from its circle to fill the screen, leaving the winner visible as a hole
+in the colour, the phone buzzes once, and two seconds after the winner lifts the
+app is ready again.
+
+`src/chooser.rs` is the rules, `src/wheel.rs` is the spin, and neither has a DOM or
+a clock in it — which is why they can be tested exhaustively. `src/ui.rs` is the
+thin browser layer around them. See [AGENTS.md](AGENTS.md) for the details, the
+timings (all the original's), and the two subtleties of the original that are easy
+to get wrong.
 
 ## License
 

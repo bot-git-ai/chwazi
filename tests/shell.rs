@@ -452,6 +452,17 @@ fn no_user_visible_text_names_the_implementation() {
         );
     }
 
+    // The splash is the page's first visible state, so it is checked as rendered
+    // text like any other -- a loading message is user-visible text too.
+    assert!(
+        page.contains("id=\"splash\""),
+        "the shell must have a splash to cover the moment before the app starts"
+    );
+    assert!(
+        page.contains("./icon.svg"),
+        "and it must be the app's own committed icon"
+    );
+
     // And the same for the half of the UI that Rust writes into the DOM, which
     // this test can only reach as source.
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
@@ -528,6 +539,33 @@ fn string_literals(source: &str) -> Vec<String> {
         .step_by(2)
         .map(|literal| literal.to_string())
         .collect()
+}
+
+/// The splash must not be able to eat a touch.
+///
+/// The app is people slapping a phone, and the moment they do it is the moment
+/// the app starts. A splash that is still on screen over the canvas -- fading, or
+/// waiting on a timer -- swallows the first tap of every round. So it is
+/// removed outright by the first frame, and the only thing over the canvas is
+/// the canvas.
+#[test]
+fn the_splash_cannot_swallow_the_first_touch() {
+    let page = shell();
+    assert!(
+        page.contains("pointer-events: none") || page.contains("splash.remove()"),
+        "the splash must not intercept touches once the app is up"
+    );
+    // And it must be marked as decoration, so a screen reader reads the canvas
+    // and not the splash's prompt twice.
+    assert!(
+        page.contains("alt=\"\"") || page.contains("aria-hidden"),
+        "the splash image is decoration and must be labelled as such"
+    );
+    let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
+    assert!(
+        ui.contains("drop_splash") || ui.contains("splash"),
+        "Rust must take the splash down itself, not wait for a timer"
+    );
 }
 
 /// The manifest is assembled in `build.rs` from constants, so this asserts on

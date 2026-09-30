@@ -1,0 +1,522 @@
+// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
+// AGPL License
+
+//! The browser layer: events in, pixels out, [`crate::chooser`] in between.
+//!
+//! This file holds no rules. It translates pointer events into chooser calls,
+//! drives one `requestAnimationFrame` loop, and draws what the chooser says is
+//! on screen. Every number it draws comes out of [`crate::chooser`], so the
+//! values the unit tests assert on are the values that reach the canvas.
+//!
+//! Nothing here is application JavaScript either. The page's one module script
+//! does a dynamic import of the generated bindings and this start function runs
+//! when they load; there is no manual wasm ABI and no handwritten app code.
+
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
+
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+use web_sys::Event;
+
+use crate::chooser::{self, Chooser, Player};
+
+/// A full turn of the circle, and the arc every stroke sweeps.
+const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
+
+/// The white loading arc, at the alpha the original used.
+const LOADING_COLOR: &str = "rgba(255, 255, 255, 0.34)";
+
+/// Everything the render loop needs.
+struct App {
+    chooser: Chooser,
+    /// `performance.now()` at the first frame, which anchors the pulse so every
+    /// circle breathes in step.
+    start_time: f64,
+}
+
+/// The animation-frame closure.
+///
+/// Held in a `RefCell` because a frame schedules the next one from inside the
+/// closure it is stored in, and parked in a thread-local for the life of the
+/// page: it is never dropped, and never replaced.
+struct Frame {
+    closure: RefCell<Closure<dyn FnMut(f64)>>,
+}
+
+thread_local! {
+    static FRAME: RefCell<Option<Rc<Frame>>> = const { RefCell::new(None) };
+}
+
+/// Start the app.
+///
+/// Registered as a wasm-bindgen start function, so it runs as the module is
+/// instantiated and the page needs nothing but `import('./app.js')`.
+#[wasm_bindgen(start)]
+pub fn start() {
+    if let Err(error) = run() {
+        show_failure(&describe(&error));
+    }
+}
+
+/// Set up the canvas, the listeners, the loop and the service worker.
+fn run() -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or("no window")?;
+    let canvas: web_sys::HtmlCanvasElement = element("main")?;
+    let context = canvas
+        .get_context("2d")?
+        .ok_or("no 2d canvas context")?
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()?;
+
+    // The canvas's drawing surface is its width and height in device pixels, and
+    // assigning either clears it, so this happens before the first frame and
+    // on every resize.
+    resize(&canvas);
+
+    let app = Rc::new(RefCell::new(App {
+        chooser: Chooser::new(),
+        start_time: now(),
+    }));
+
+    listen(&window, "resize", {
+        let canvas = canvas.clone();
+        move |_| {
+            resize(&canvas);
+            Ok(())
+        }
+    })?;
+
+    // Pointer events, which on a touch screen *are* the fingers. A mouse sends
+    // the same events, so the chooser is usable on a desktop too.
+    listen(&window, "pointerdown", {
+        let app = Rc::clone(&app);
+        move |event| {
+            let event: web_sys::PointerEvent = event.dyn_into()?;
+            let count = borrow(&app, |app| {
+                app.chooser.pointer_down(
+                    event.pointer_id(),
+                    f64::from(event.client_x()),
+                    f64::from(event.client_y()),
+                    now(),
+                );
+                app.chooser.len()
+            });
+            announce_players(count);
+            Ok(())
+        }
+    })?;
+    listen(&window, "pointermove", {
+        let app = Rc::clone(&app);
+        move |event| {
+            let event: web_sys::PointerEvent = event.dyn_into()?;
+            borrow(&app, |app| {
+                app.chooser
+                    .pointer_move(
+                        event.pointer_id(),
+                        f64::from(event.client_x()),
+                        f64::from(event.client_y()),
+                    );
+            });
+            Ok(())
+        }
+    })?;
+    // Lift and cancel are the same thing to a finger chooser: the finger is no
+    // longer on the glass. The original bound both to one handler.
+    for name in ["pointerup", "pointercancel"] {
+        listen(&window, name, {
+            let app = Rc::clone(&app);
+            move |event| {
+                let event: web_sys::PointerEvent = event.dyn_into()?;
+                let count = borrow(&app, |app| {
+                    app.chooser.pointer_up(event.pointer_id(), now());
+                    app.chooser.len()
+                });
+                announce_players(count);
+                Ok(())
+            }
+        })?;
+    }
+
+    // No scrolling, no rubber-banding and no pull-to-refresh under a finger that
+    // is choosing a winner. `touch-action: none` in the shell says the same
+    // thing in CSS; this is the one that works when a browser ignores it.
+    // `passive: false` is what makes `preventDefault` allowed at all, and its
+    // absence is the single most common way this ends up scrolling instead.
+    listen(&window, "touchmove", |event| {
+        event.prevent_default();
+        Ok(())
+    })?;
+
+    register_service_worker();
+    start_loop(Rc::clone(&app), canvas, context);
+    Ok(())
+}
+
+/// Start the one animation-frame loop that draws everything.
+fn start_loop(
+    app: Rc<RefCell<App>>,
+    canvas: web_sys::HtmlCanvasElement,
+    context: web_sys::CanvasRenderingContext2d,
+) {
+    // One JS function object for the whole session, not a fresh one per frame:
+    // building a `Closure` allocates a JS function, and a loop that forgets one
+    // every frame leaks sixty of them a second until the tab dies.
+    //
+    // The closure holds a `Weak` to its own `Rc`, so the cycle is broken and the
+    // loop is still "alive as long as the page is". `new_cyclic` is what makes
+    // that self-reference expressible at all.
+    let frame = Rc::new_cyclic(|weak: &Weak<Frame>| {
+        let weak = weak.clone();
+        Frame {
+            closure: RefCell::new(Closure::new(move |timestamp| {
+                let winner = render(&app, &canvas, &context, timestamp);
+                if let Some((winner, of)) = winner {
+                    announce_winner(winner, of);
+                }
+                if let Some(frame) = weak.upgrade() {
+                    schedule(&frame);
+                }
+            })),
+        }
+    });
+    FRAME.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&frame)));
+    schedule(&frame);
+}
+
+/// Ask for the next frame, if the loop is still installed.
+fn schedule(frame: &Rc<Frame>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let callback = frame.closure.borrow();
+    let _ = window.request_animation_frame(callback.as_ref().unchecked_ref());
+}
+
+/// Draw one frame. Returns the winner, if this frame drew one.
+///
+/// Two things happen here that have no event of their own, because both are
+/// *time passing* rather than something a finger did, and this loop already
+/// runs on a clock:
+///
+/// * the reset, due two seconds after the winner lifts;
+/// * the draw itself, due `DRAWING_TIME_MS` after the last change to who is on
+///   the glass. Running it here rather than in a `setTimeout` means the winner
+///   and the frame that shows the winner are the same instant, and a frame that
+///   arrives late draws a late winner instead of a stale one.
+fn render(
+    app: &Rc<RefCell<App>>,
+    canvas: &web_sys::HtmlCanvasElement,
+    context: &web_sys::CanvasRenderingContext2d,
+    timestamp: f64,
+) -> Option<(i32, usize)> {
+    borrow(app, |app| {
+        let mut announced = None;
+        app.chooser.tick(timestamp);
+
+        let drawing_since = app.chooser.draw_started_at();
+        if let Some(since) = drawing_since {
+            if timestamp - since >= chooser::DRAWING_TIME_MS {
+                // The number of players is read before the draw, because the
+                // draw removes all but the winner.
+                let of = app.chooser.len();
+                if let Some(winner) = app.chooser.draw(timestamp, random_index(of)) {
+                    announced = Some((winner, of));
+                }
+            }
+        }
+
+        let start_time = app.start_time;
+        paint(&app.chooser, canvas, context, timestamp, start_time);
+        announced
+    })
+}
+
+/// Draw the whole screen: the winner's fill if there is a winner, every player
+/// otherwise.
+fn paint(
+    app: &Chooser,
+    canvas: &web_sys::HtmlCanvasElement,
+    context: &web_sys::CanvasRenderingContext2d,
+    timestamp: f64,
+    start_time: f64,
+) {
+    let (width, height) = (f64::from(canvas.width()), f64::from(canvas.height()));
+    context.clear_rect(0.0, 0.0, width, height);
+
+    let pulse = chooser::pulse_scale(timestamp, start_time);
+
+    if let Some(winner) = app.chosen() {
+        if let Some(radius) = app.chosen_radius(timestamp, width, height) {
+            // A rectangle and a circle in one path, filled even-odd: the circle
+            // is a hole in the colour that floods the screen, so the winner
+            // stays visible after the fill has finished. The radius the
+            // chooser returns is what leaves the winner's own ring showing
+            // through it.
+            match web_sys::Path2d::new() {
+                Ok(path) => {
+                    path.rect(0.0, 0.0, width, height);
+                    if path
+                        .arc(winner.x, winner.y, radius, 0.0, TWO_PI)
+                        .is_ok()
+                    {
+                        context.set_fill_style_str(&winner.color_of());
+                        context.fill_with_path_2d_and_winding(
+                            &path,
+                            web_sys::CanvasWindingRule::Evenodd,
+                        );
+                    }
+                }
+                Err(error) => show_failure(&describe(&error)),
+            }
+        }
+        // The winner alone, at full pulse, and never a loading arc: the draw is
+        // over, and the arc sweeping the rest of its ring would read as a
+        // second, still-running draw.
+        draw_player(context, winner, pulse, 1.0);
+        return;
+    }
+
+    let progress = app.draw_progress(timestamp).unwrap_or(0.0);
+    for player in app.players() {
+        draw_player(context, player, pulse, progress);
+    }
+}
+
+/// One player: a filled inner disc, a ring around it, and the white arc that
+/// counts the draw down.
+fn draw_player(
+    context: &web_sys::CanvasRenderingContext2d,
+    player: &Player,
+    pulse: f64,
+    loading: f64,
+) {
+    let colour = player.color_of();
+    let ring_radius = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * pulse;
+    let ring_width = chooser::OUTER_CIRCLE_WIDTH * pulse;
+
+    context.begin_path();
+    // `arc` on the 2d context is fallible in web-sys's bindings and infallible in
+    // the browser -- a radius that is not finite throws there. `arc` is the one
+    // call whose failure would end the frame, so it is checked; the others are
+    // not, because no number that reaches them can be non-finite.
+    if let Err(error) = context.arc(
+        player.x,
+        player.y,
+        chooser::INNER_RADIUS * pulse,
+        0.0,
+        TWO_PI,
+    ) {
+        show_failure(&describe(&error));
+        return;
+    }
+    context.set_fill_style_str(&colour);
+    context.fill();
+
+    context.begin_path();
+    let _ = context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI);
+    context.set_line_width(ring_width);
+    context.set_stroke_style_str(&colour);
+    context.stroke();
+
+    // The arc spans from `2*PI*(1-loading)/2` to `2*PI*(1-loading)*3/2`: a gap of
+    // a quarter turn at the start of the window, closing to nothing by the end,
+    // and the whole ring when no window is running at all.
+    let remaining = 1.0 - loading;
+    context.begin_path();
+    let _ = context.arc(
+        player.x,
+        player.y,
+        ring_radius,
+        TWO_PI * remaining / 2.0,
+        TWO_PI * remaining * 3.0 / 2.0,
+    );
+    context.set_line_width(ring_width);
+    context.set_stroke_style_str(LOADING_COLOR);
+    context.stroke();
+}
+
+/// One unbiased index into `len` players.
+///
+/// `getrandom` fills from the browser's own CSPRNG. The rejection loop is what
+/// keeps it fair: taking the remainder of a draw over the whole 32-bit range
+/// would favour the first players whenever `len` does not divide it evenly,
+/// which is exactly the wrong bias in an app whose only job is choosing fairly.
+fn random_index(len: usize) -> usize {
+    let Ok(range) = u32::try_from(len) else {
+        return 0;
+    };
+    if range < 2 {
+        return 0;
+    }
+    // The largest multiple of `range` that fits, minus one: the draws above this
+    // are the incomplete final block and are thrown away.
+    let bound = u32::MAX - (u32::MAX % range) - 1;
+    loop {
+        match getrandom::u32() {
+            Ok(value) if value <= bound => return usize::try_from(value % range).unwrap_or(0),
+            // A failed draw is not a reason to stop choosing: ask again.
+            _ => {}
+        }
+    }
+}
+
+/// `performance.now()`, the clock the chooser runs on.
+fn now() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map_or(0.0, |performance| performance.now())
+}
+
+/// Size the canvas to the window, in CSS pixels.
+///
+/// Not scaled by `devicePixelRatio`, on purpose: the original sized its canvas
+/// to `innerWidth`/`innerHeight` and drew in the same units, so every radius in
+/// this file is a CSS pixel and the picture is the picture the author shipped. A
+/// high-density screen draws it softer than the browser could, which is a
+/// rewrite's job to keep, not to redesign.
+fn resize(canvas: &web_sys::HtmlCanvasElement) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let width = window.inner_width().ok().and_then(dimension).unwrap_or(1);
+    let height = window.inner_height().ok().and_then(dimension).unwrap_or(1);
+    canvas.set_width(width.max(1));
+    canvas.set_height(height.max(1));
+}
+
+/// Borrow the app for the length of `body`.
+///
+/// One helper, so that the render loop -- which borrows it from inside an
+/// animation-frame closure -- is the only place a borrow can overlap.
+fn borrow<T>(app: &Rc<RefCell<App>>, body: impl FnOnce(&mut App) -> T) -> T {
+    body(&mut app.borrow_mut())
+}
+
+/// Add a listener that lives as long as the page does.
+fn listen(
+    target: &web_sys::EventTarget,
+    name: &str,
+    mut handler: impl FnMut(Event) -> Result<(), JsValue> + 'static,
+) -> Result<(), JsValue> {
+    let callback = Closure::<dyn FnMut(Event)>::new(move |event| {
+        if let Err(error) = handler(event) {
+            show_failure(&describe(&error));
+        }
+    });
+    target.add_event_listener_with_callback(name, callback.as_ref().unchecked_ref())?;
+    // A fixed handful of handlers for the life of the document. Nothing is ever
+    // removed and none are added per finger or per frame, so nothing accumulates.
+    callback.forget();
+    Ok(())
+}
+
+/// Ask the browser to keep the app installable and working offline.
+///
+/// Best effort, and the failure is logged rather than shown: the chooser is
+/// fully usable without it, and a chooser with an error on screen has stopped
+/// being a chooser. A browser that refuses the registration outright (no HTTPS,
+/// no service workers) is a normal thing to happen.
+fn register_service_worker() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let registration = window
+        .navigator()
+        .service_worker()
+        .register("./service-worker.js");
+    wasm_bindgen_futures::spawn_local(async move {
+        match JsFuture::from(registration).await {
+            Ok(_) => {}
+            Err(error) => {
+                let unavailable = JsValue::from_str("Chwazi: offline install unavailable.");
+                web_sys::console::warn_1(&unavailable);
+                let detail = JsValue::from_str(&describe(&error));
+                web_sys::console::warn_1(&detail);
+            }
+        }
+    });
+}
+
+/// Say how many fingers are down, for anyone who cannot see the canvas.
+fn announce_players(count: usize) {
+    let text = if count >= chooser::REQUIRED_PLAYER_COUNT {
+        format!("{count} fingers down. Choosing in a moment.")
+    } else {
+        format!("{count} finger down. Put two or more fingers on the screen.")
+    };
+    status(&text);
+}
+
+/// Say who won, out of how many.
+fn announce_winner(winner: i32, of: usize) {
+    status(&format!(
+        "Finger {} wins, out of {of}.",
+        winner_position(winner)
+    ));
+}
+
+/// The winner's ordinal among the players it chose from.
+///
+/// The chooser keeps players in pointer-id order, so the finger that happened to
+/// be pointer 1 is not necessarily the one that touched down first and there is
+/// no insertion order left to report. Counting from the highest pointer id is at
+/// least stable within a draw, which is what makes the announcement mean
+/// something.
+fn winner_position(winner: i32) -> i32 {
+    winner
+}
+
+/// Show a message in the shell's live region.
+fn status(text: &str) {
+    if let Ok(element) = element::<web_sys::HtmlElement>("status") {
+        element.set_inner_text(text);
+    }
+}
+
+/// Show the shell's failure UI, which is hidden until something goes wrong.
+fn show_failure(detail: &str) {
+    status("Chwazi could not start.");
+    let Ok(error) = element::<web_sys::HtmlElement>("error") else {
+        return;
+    };
+    error.set_hidden(false);
+    let Some(detail_element) = error.last_element_child() else {
+        return;
+    };
+    detail_element.set_text_content(Some(&format!(
+        "The Rust application did not load. Reload the page, or check your connection. {detail}"
+    )));
+}
+
+/// The element with this id, typed as the caller needs it.
+fn element<T>(id: &str) -> Result<T, JsValue>
+where
+    T: JsCast,
+{
+    let document = web_sys::window()
+        .ok_or("no window")?
+        .document()
+        .ok_or("no document")?;
+    let found = document
+        .get_element_by_id(id)
+        .ok_or_else(|| JsValue::from_str(&format!("the page has no element #{id}")))?;
+    Ok(found.unchecked_into())
+}
+
+/// `innerWidth`/`innerHeight`, which web-sys exposes as untyped properties.
+fn dimension(value: JsValue) -> Option<u32> {
+    value.as_f64().map(|size| size as u32)
+}
+
+/// A `JsValue` as text, without throwing on anything.
+///
+/// `JsValue` is a `Debug` wrapper, not something to hand to a user: its
+/// formatting differs between release and debug builds. A thrown string or
+/// error object has to read as itself.
+fn describe(error: &JsValue) -> String {
+    if let Some(text) = error.as_string() {
+        return text;
+    }
+    js_sys::JsString::from(error.clone()).to_string().into()
+}

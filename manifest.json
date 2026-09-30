@@ -1,7 +1,0 @@
-{
-  "name": "Chwazi Finger Chooser",
-  "short_name": "Chwazi",
-  "start_url": ".",
-  "display": "fullscreen",
-  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
-}

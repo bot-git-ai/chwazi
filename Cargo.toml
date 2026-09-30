@@ -5,8 +5,46 @@ name = "chwazi"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
+description = "Private, browser-side multi-touch finger chooser in Rust"
 
 [lib]
 name = "chwazi"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Only the browser needs entropy, and only to pick the winner. On the host the
+# chooser is driven by unit tests with an explicit index, so `getrandom` is a
+# wasm-only dependency and is never compiled into a native build.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4.78"
+js-sys = "0.3.105"
+web-sys = { version = "0.3.105", features = [
+  # The finger chooser needs none of the form controls the other apps do: its
+  # entire interface is one canvas and the pointer events a phone sends it.
+  "Window", "Document", "Element", "Event", "EventTarget",
+  "Node", "NodeList", "HtmlElement",
+  "HtmlCanvasElement", "CanvasRenderingContext2d", "CanvasWindingRule", "Path2d",
+  "PointerEvent", "TouchEvent", "DomRect", "DomPoint", "Text",
+  "Performance", "EventListenerOptions", "console",
+  "Navigator", "ServiceWorkerContainer", "ServiceWorkerRegistration",
+] }
+
+[build-dependencies]
+usvg = { version = "0.48", default-features = false }
+resvg = { version = "0.48", default-features = false }
+tiny-skia = "0.12"
+serde_json = "1"
+
+[lints.rust]
+warnings = "deny"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"

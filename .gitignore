@@ -1,0 +1,5 @@
+target/
+# Build output of `cargo build` + wasm-bindgen: the eight-file static site, and
+# the two install PNGs rasterized from `assets/icon.svg`. Generated, never
+# committed -- it is reproducible from the committed sources.
+dist/

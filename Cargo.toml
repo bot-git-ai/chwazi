@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
+# AGPL License
+[package]
+name = "chwazi"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "chwazi"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"

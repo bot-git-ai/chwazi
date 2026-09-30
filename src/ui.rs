@@ -485,7 +485,7 @@ fn show_failure(detail: &str) {
         return;
     };
     detail_element.set_text_content(Some(&format!(
-        "The Rust application did not load. Reload the page, or check your connection. {detail}"
+        "Chwazi could not start. Reload the page, or check your connection. ({detail})"
     )));
 }
 

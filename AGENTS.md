@@ -78,6 +78,28 @@ Everything the shell references is relative (`./app.js`,
 `new URL('./', self.location.href)`, `start_url: "./"`), so one build works from
 any subdirectory.
 
+## Timings
+
+These are the original's, unchanged, and they are the reason the app feels the
+way it does. They are listed here because a rewrite is exactly when they quietly
+get "improved", and on this app every one of them is the feel:
+
+| | |
+|---|---|
+| `SCALING_PERIOD_MS` = 1500 | one breath of the pulse, per the original |
+| `DRAWING_TIME_MS` = 2500 | how long the players present get to be picked |
+| `CHOSEN_PLAYER_ANIMATION_TIME_MS` = 1000 | the winner's colour flooding the screen |
+| `RESTART_DELAY` = 2000 | after the winner lifts, before the next draw |
+
+A circle appears on the frame after `pointerdown` — the same frame the original
+drew it on, because the original also mutated its map in the event handler and
+drew on the next `requestAnimationFrame`. Nothing is deferred, queued or
+throttled between a finger landing and its circle.
+
+The two notes below that look like caveats about speed are not: `reduced-motion`
+is about *whether* the pulse runs, not how fast, and the pulse's rate is the
+original's 1500ms in either case.
+
 ## The icon
 
 `assets/icon.svg` is the author's original Material Symbols **"touch_long"**,
@@ -175,7 +197,12 @@ life of the page. A `requestAnimationFrame` callback that forgets a fresh
   `devicePixelRatio` — the original's behaviour, kept so every radius here is a
   CSS pixel and the picture is the picture the author shipped. On a
   high-density screen it is drawn softer than the browser could.
-- `prefers-reduced-motion` is not honoured. The pulse is the app, not decoration:
-  it is how a player tells their own finger apart from everyone else's. The
-  original ignored it too, and a chooser whose circles do not breathe is a
-  different app.
+- `prefers-reduced-motion` is not honoured. This is a decision about *whether*
+  the pulse runs, not about its speed — it runs at the original's 1500ms period
+  either way. The pulse is the app, not decoration: it is how a player tells
+  their own finger apart from everyone else's. The original ignored the setting
+  too, and a chooser whose circles do not breathe is a different app.
+- A pointer event is handled before the frame that draws it, and the only work
+  in that handler is the state change itself. The screen-reader announcement is
+  written from the render loop rather than from the handler, so nothing but the
+  chooser runs between a finger landing and its circle appearing.

@@ -318,6 +318,115 @@ fn published_files() -> Vec<String> {
     files
 }
 
+/// Nothing the player can read may name how the app is built.
+///
+/// A player who cannot start the app needs something they can act on. "The Rust
+/// application did not load" tells them nothing: they did not choose the
+/// language, cannot change it, and will not know what to do with the sentence.
+/// The interface says what failed and what to try; the implementation is an
+/// explanation for whoever maintains this, and belongs in `AGENTS.md`.
+///
+/// Scoped to what the DOM actually renders — the tags that carry text — because
+/// `src/ui.html` is full of comments that are *about* Rust and must stay that
+/// way.
+#[test]
+fn no_user_visible_text_names_the_implementation() {
+    let page = shell();
+    let text = rendered_text(&page);
+
+    for banned in [
+        "rust",
+        "webassembly",
+        "wasm",
+        "javascript",
+        "bindings",
+        "compiled",
+        "compile",
+    ] {
+        assert!(
+            !text.to_lowercase().contains(banned),
+            "the rendered page says {banned:?}, which a player cannot act on: {text:?}"
+        );
+    }
+
+    // And the same for the half of the UI that Rust writes into the DOM, which
+    // this test can only reach as source.
+    let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
+    for string in string_literals(&ui) {
+        let shows_in_the_ui = string.contains("could not start")
+            || string.contains("finger")
+            || string.contains("wins")
+            || string.contains("Chwazi");
+        if !shows_in_the_ui {
+            continue;
+        }
+        for banned in ["rust", "webassembly", "wasm", "javascript", "bindings"] {
+            assert!(
+                !string.to_lowercase().contains(banned),
+                "src/ui.rs writes {string:?} into the DOM, and it says {banned:?}"
+            );
+        }
+    }
+
+    // A loader failure the player can do something about. Checked rather than
+    // assumed, because this string is the only thing standing between a failed
+    // load and a blank black screen.
+    assert!(
+        page.contains("could not start")
+            && page.contains("Reload the page"),
+        "the failure UI must say what failed and what to try"
+    );
+    assert!(
+        !page.contains("The Rust application"),
+        "the old implementation-naming failure message must not come back"
+    );
+}
+
+/// The text the page renders: HTML comments, CSS and scripts removed.
+///
+/// A tag-aware pass is overkill for a shell with no attributes containing prose.
+/// What it must not do is match comments or the stylesheet, which legitimately
+/// talk about Rust and about `touch-action` by name.
+fn rendered_text(page: &str) -> String {
+    let mut text = page.to_string();
+    for (open, close) in [
+        ("<style", "</style>"),
+        ("<!--", "-->"),
+        ("<script", "</script>"),
+    ] {
+        while let Some(start) = text.find(open) {
+            let end = text[start..]
+                .find(close)
+                .map(|end| start + end + close.len())
+                .unwrap_or(text.len());
+            text = format!("{}{}", &text[..start], &text[end..]);
+        }
+    }
+    // Tags out. Entities are left alone: no word the rule bans can hide in one.
+    while let Some(start) = text.find('<') {
+        let end = text[start..]
+            .find('>')
+            .map(|end| start + end + 1)
+            .unwrap_or(text.len());
+        text = format!("{}{}", &text[..start], &text[end..]);
+    }
+    text.replace("&nbsp;", " ")
+}
+
+/// The contents of every string literal in a source file.
+///
+/// Deliberately simple: it splits on quotes rather than parsing Rust, because
+/// the point is to have every candidate in hand cheaply, and the filter above
+/// discards the overwhelming majority of them.
+fn string_literals(source: &str) -> Vec<String> {
+    source
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(|literal| literal.to_string())
+        .collect()
+}
+
 /// The manifest is assembled in `build.rs` from constants, so this asserts on
 /// those — the only copy a test can reach, since the built one is gitignored.
 /// What it pins is what the original `manifest.json` chose: the name, the short

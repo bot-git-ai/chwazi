@@ -33,6 +33,7 @@ web-sys = { version = "0.3.105", features = [
   "PointerEvent", "TouchEvent", "DomRect", "DomPoint", "Text",
   "Performance", "EventListenerOptions", "console",
   "Navigator", "ServiceWorkerContainer", "ServiceWorkerRegistration",
+  "ServiceWorker", "RegistrationOptions", "Location", "Url",
 ] }
 
 [build-dependencies]

@@ -93,13 +93,9 @@ fn run() -> Result<(), JsValue> {
         let app = Rc::clone(&app);
         move |event| {
             let event: web_sys::PointerEvent = event.dyn_into()?;
+            let (id, x, y) = at(&event);
             let count = borrow(&app, |app| {
-                app.chooser.pointer_down(
-                    event.pointer_id(),
-                    f64::from(event.client_x()),
-                    f64::from(event.client_y()),
-                    now(),
-                );
+                app.chooser.pointer_down(id, x, y, now());
                 app.chooser.len()
             });
             announce_players(count);
@@ -110,14 +106,8 @@ fn run() -> Result<(), JsValue> {
         let app = Rc::clone(&app);
         move |event| {
             let event: web_sys::PointerEvent = event.dyn_into()?;
-            borrow(&app, |app| {
-                app.chooser
-                    .pointer_move(
-                        event.pointer_id(),
-                        f64::from(event.client_x()),
-                        f64::from(event.client_y()),
-                    );
-            });
+            let (id, x, y) = at(&event);
+            borrow(&app, |app| app.chooser.pointer_move(id, x, y));
             Ok(())
         }
     })?;
@@ -359,6 +349,32 @@ fn random_index(len: usize) -> usize {
             _ => {}
         }
     }
+}
+
+/// One pointer event's id and position, in the units the chooser uses.
+///
+/// The call sites each read `pointerId`, `clientX` and `clientY` off an event,
+/// and web-sys types those two getters differently depending on whether
+/// `web_sys_unstable_apis` is set: `i32` normally, `f64` behind the cfg. So
+/// there is no single spelling of a conversion here that is both correct and
+/// lint-clean in both configurations:
+///
+/// * `f64::from(x)` is right normally and `clippy::useless_conversion` behind
+///   the cfg, because `From<f64> for f64` is the identity impl and clippy
+///   reaches the resolved one through the concrete getter's return type;
+/// * `x as f64` is right behind the cfg and `clippy::unnecessary_cast` normally.
+///
+/// Both were tried here and both failed one side, which is the evidence for the
+/// attribute below rather than an argument against it.
+///
+/// `Into` is the one that satisfies both, because a `From` impl makes
+/// `Into` resolve to it without pinning a source type for inference the way
+/// `f64::from` does. The values are CSS pixels, so they sit well inside `f64`'s
+/// exact-integer range and no precision is at stake.
+#[allow(clippy::useless_conversion)]
+fn at(event: &web_sys::PointerEvent) -> (i32, f64, f64) {
+    let (id, x, y) = (event.pointer_id(), event.client_x(), event.client_y());
+    (id, x.into(), y.into())
 }
 
 /// `performance.now()`, the clock the chooser runs on.

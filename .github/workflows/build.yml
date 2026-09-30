@@ -6,8 +6,8 @@ name: build
 # convenience: `build.rs` derives the service worker's cache version from the
 # bytes of every other file in `dist/`, and the wasm is one of them. Building
 # the host side first would pin the cache to whatever the previous build left
-# behind, and the job would ship a clock whose cache never invalidates. So this
-# runs exactly what AGENTS.md documents, in the order it documents it.
+# behind, and the job would ship a chooser whose cache never invalidates. So
+# this runs exactly what AGENTS.md documents, in the order it documents it.
 #
 # What the job is for: the wasm and the bindings are build output and are never
 # committed, so nothing in the repository proves they still build, or that the
@@ -32,15 +32,20 @@ env:
   CARGO_TERM_COLOR: always
   # Must match the `wasm-bindgen = "=0.2.128"` pin in Cargo.toml. A mismatched
   # generator emits bindings the runtime will not load, and the page then fails
-  # to start with "Chess Clock could not start" -- a failure that looks like an
-  # app bug and is not one.
+  # to start with "Chwazi could not start" -- a failure that looks like an app
+  # bug and is not one.
   WASM_BINDGEN_VERSION: 0.2.128
-  # The Screen Wake Lock API is behind `web_sys_unstable_apis` in web-sys
-  # 0.3.105 -- all of it, including the `WakeLockSentinel` type. It is set in
-  # `build.rs` via `cargo:rustc-cfg` for the wasm target, which is the only
-  # mechanism that reaches a crate's own compilation. Exported here as well so
-  # the clippy run in step 7, which builds the wasm lib, sees the same cfg.
-  RUSTFLAGS: --cfg=web_sys_unstable_apis
+  # NO RUSTFLAGS HERE, DELIBERATELY. `web_sys_unstable_apis` is for apps that
+  # use web-sys's unstable surface (a Screen Wake Lock, say), which chwazi does
+  # not: it holds a screen awake for a handful of seconds while fingers are on
+  # the glass, and nothing about it needs an unstable API. Setting the cfg
+  # anyway -- which is what copying another repo's workflow does -- lints a
+  # *different* web-sys than the one the crate is built against, because several
+  # getters are typed differently behind it: `MouseEvent::client_x` is `i32`
+  # normally and `f64` with the cfg set. That is not cosmetic. A green host
+  # clippy says nothing here, because the host build compiles no web-sys code at
+  # all, so the wasm clippy run below is the only thing that sees it -- and it
+  # sees it with whatever cfg this file sets.
 
 jobs:
   build:
@@ -231,9 +236,11 @@ jobs:
           # only for the target being compiled, so a clean host build says
           # nothing about the wasm one.
           #
-          # `RUSTFLAGS` carries the wake-lock cfg for the wasm half; the host
-          # half does not want it (the host build compiles no web-sys code at
-          # all) but inheriting it is harmless and keeps one variable.
+          # With no `RUSTFLAGS` in `env`, this lints the same web-sys the build
+          # above used. That has to be true, and not merely tidy: see the note
+          # at the top of this file. Both halves are needed -- the host build
+          # compiles no web-sys code at all, so it cannot see a single one of
+          # these lints, and a wasm-only clippy would never look at `tests/`.
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --lib --target wasm32-unknown-unknown -- -D warnings
 

@@ -42,9 +42,10 @@ over the committed shell in `tests/shell.rs`.
 
 ## How it works
 
-Each finger down becomes a player, drawn as a filled disc inside a ring, pulsing
-between 0.875× and 1.125× its size, in a colour spread around the hue wheel by
-`hsl(pointerId * 223 + 263, 100%, 40%)`. A white arc sweeps each ring while a draw
+Each finger down becomes a player, drawn as a filled disc inside a hairline ring,
+pulsing between 0.93× and 1.07× its size, in a colour spread around the hue wheel
+by `hsl(pointerId * 223 + 263, 100%, 40%)`. The sizes and the pulse rate are
+measured off screen recordings of the native app, not guessed. A white arc sweeps each ring while a draw
 runs. Two or more players and 2500ms of stillness choose one at random; its colour
 expands from its circle to fill the screen, leaving the winner visible as a hole
 in the colour, and two seconds after the winner lifts the app is ready again.

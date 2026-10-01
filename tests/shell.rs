@@ -530,6 +530,39 @@ fn string_literals(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// The start screen is bare.
+///
+/// The native app's start screen carries three things this one has no business
+/// having: a play counter ("You made 53 Chwazi's"), a prompt, and two menu icons in
+/// corners. All three are out — a counter is state this app does not keep, a
+/// prompt is in the way of the thing being looked at, and menu icons are a settings
+/// screen this app does not have. The canvas is the whole interface.
+#[test]
+fn the_start_screen_is_bare() {
+    let page = shell();
+    for unwanted in [
+        "You made",
+        "Put at least",
+        "Chwazi's",
+        "1W",
+        "counter",
+    ] {
+        assert!(
+            !page.contains(unwanted),
+            "the native app's start screen has {unwanted:?}, and this one must not"
+        );
+    }
+    // Nothing is drawn on the canvas before a finger lands either: the hint that
+    // existed briefly is gone, and `tests/shell.rs` checks the rendered text.
+    let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
+    for unwanted in ["You made", "Put at least", "draw_hint"] {
+        assert!(
+            !ui.contains(unwanted),
+            "Rust must not draw or write {unwanted:?} either"
+        );
+    }
+}
+
 /// The manifest is assembled in `build.rs` from constants, so this asserts on
 /// those — the only copy a test can reach, since the built one is gitignored.
 /// What it pins is what the original `manifest.json` chose: the name, the short

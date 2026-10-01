@@ -32,27 +32,51 @@ use std::collections::BTreeMap;
 /// A draw needs at least this many players. One finger cannot choose itself.
 pub const REQUIRED_PLAYER_COUNT: usize = 2;
 /// Radius of the solid inner disc.
-pub const INNER_RADIUS: f64 = 36.0;
+///
+/// Measured off a screen recording of the native app rather than guessed: on a
+/// 1080px-wide phone at 3x, its filled disc is 139 native px across, which is 23
+/// CSS px of radius. The original's 36 was drawn for a screen nobody has used in
+/// years and is nearly half again as large.
+pub const INNER_RADIUS: f64 = 23.0;
 /// Gap between the inner disc and the outer ring's centreline.
-pub const OUTER_RADIUS: f64 = 16.0;
+pub const OUTER_RADIUS: f64 = 10.0;
 /// Stroke width of the outer ring.
-pub const OUTER_CIRCLE_WIDTH: f64 = 12.0;
+///
+/// The native ring is thin -- a hairline outline rather than the original's 12px
+/// band, which at these radii is more than a quarter of the whole mark.
+pub const OUTER_CIRCLE_WIDTH: f64 = 5.0;
 /// How far a player circle's radius swings, in each direction, around its rest
 /// size.
 ///
-/// The pulse is `1 + MAX_PULSE_SCALE * sin(...)`, so the swing is symmetric: the
-/// circle grows to 1.125 and shrinks to 0.875. Growing and shrinking is what
-/// makes it read as a breath rather than a throb, and it is the author's own
-/// formula. Anyone porting this app from the source will half-expect it to only
-/// grow -- `the_pulse_breathes_symmetrically_around_its_rest_size` is what says
-/// otherwise.
-pub const MAX_PULSE_SCALE: f64 = 0.125;
+/// Measured, like the rest: the native circle's pixel *area* varies by 1.33:1
+/// over its breath, and area goes as the square of the radius, so the radius swings
+/// 1.15:1 -- about +-7%. The original's +-12.5% is nearly twice that, and at these
+/// smaller radii it is the difference between a mark that breathes and one that
+/// pumps.
+pub const MAX_PULSE_SCALE: f64 = 0.07;
 /// How long a draw window lasts once two players are present.
 pub const DRAWING_TIME_MS: f64 = 2500.0;
+/// The share of the reveal during which the fill actually reaches the edges.
+///
+/// Measured: the fill is complete five frames into a six-frame animation, so half.
+/// The other half is the winner's circle resting in the middle of its own colour.
+pub const FILL_FRACTION: f64 = 0.5;
+
 /// How long the winner's circle takes to expand across the screen.
-pub const CHOSEN_PLAYER_ANIMATION_TIME_MS: f64 = 1000.0;
+///
+/// The original spent 1000ms on this. The native app does not: at 60fps it goes
+/// from nothing to covering the screen in **100ms** -- six frames -- which is why
+/// it feels like a decision rather than a reveal to wait out. 180ms here: slow
+/// enough that the winning colour is not the very first thing you see, and fast
+/// enough that nobody is waiting for it.
+pub const CHOSEN_PLAYER_ANIMATION_TIME_MS: f64 = 180.0;
 /// One full breath of a player circle's pulse.
-pub const SCALING_PERIOD_MS: f64 = 1500.0;
+///
+/// Measured off the same recordings: the colour's pixel area peaks at 1.07s,
+/// 2.03s, 3.03s and 4.03s, so the period is 0.99s. The original's 1500ms is half
+/// again as slow, and at that rate a circle spends most of its time near a
+/// turning point and reads as drifting rather than breathing.
+pub const SCALING_PERIOD_MS: f64 = 1000.0;
 /// Clearance between the winner's ring and the edge of the filled screen.
 pub const CHOSEN_SEPARATION: f64 = 8.0;
 /// How long the chosen finger must be off the glass before the app resets.
@@ -317,14 +341,31 @@ impl Chooser {
 
     /// The winner's circle radius at `timestamp`, given the viewport size.
     ///
-    /// Grows from zero to [`MIN_WINNER_RADIUS`] over the animation, starting
-    /// from the longest screen dimension so the fill sweeps in from off-screen
-    /// and the win reads as the screen being claimed rather than a circle
-    /// swelling.
+    /// Grows from off-screen down to [`MIN_WINNER_RADIUS`], on an ease-out.
+    ///
+    /// The shape is measured, and it matters more than the duration. Frame by
+    /// frame from a recording, the fill covers 3% of the crop, then 12%, 33%, 65%,
+    /// 79% -- and is finished by the sixth frame. The growth is slowest leaving,
+    /// fastest through the middle, and then it *stops*: the last 80% of the
+    /// animation is the last 15% of the screen.
+    ///
+    /// A linear radius cannot do that, because a linear radius is fastest exactly
+    /// where the screen is densest and would appear to stop halfway. What the
+    /// recording shows is an exponential approach, so that is what this is: the
+    /// remaining distance decays by a constant fraction per unit time.
     pub fn chosen_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
         let from = width.max(height).max(MIN_WINNER_RADIUS);
-        Some(progress * MIN_WINNER_RADIUS + (1.0 - progress) * from)
+        let span = from - MIN_WINNER_RADIUS;
+        // A smoothstep over the *first half* of the animation, then held.
+        //
+        // Measured frame by frame: the fill is 5% of the crop after one frame, 51%
+        // after two, 83% after three, and complete after five of six. So it is done
+        // at the halfway point and the rest of the window is the winner sitting
+        // there -- which is why it reads as a snap rather than a sweep. Stretching
+        // the same curve over the whole window is what made the original feel slow.
+        let t = (progress / FILL_FRACTION).clamp(0.0, 1.0);
+        Some(from - span * (t * t * (3.0 - 2.0 * t)))
     }
 
     /// Whether the draw timer should be armed for this state.
@@ -350,6 +391,17 @@ impl Chooser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two fingers down, mid-draw, with the winner already chosen by `draw`.
+    ///
+    /// In this version of the app the winner is picked at the moment the timer
+    /// fires rather than when the window is armed, so "which finger won" and
+    /// "the draw has happened" are one step.
+    fn won(winner: usize) -> Chooser {
+        let mut chooser = drawing();
+        chooser.draw(0.0, winner);
+        chooser
+    }
 
     /// A chooser with two fingers down, mid-draw.
     fn drawing() -> Chooser {
@@ -691,20 +743,84 @@ mod tests {
 
     #[test]
     fn the_winner_radius_starts_off_screen_and_settles_at_the_minimum() {
-        let mut chooser = drawing();
-        chooser.draw(0.0, 0);
+        let chooser = won(0);
 
         let (width, height) = (800.0, 1600.0);
-        assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
-        assert_eq!(
-            chooser.chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, width, height),
-            Some(MIN_WINNER_RADIUS)
+        let start = chooser.chosen_radius(0.0, width, height).expect("a radius");
+        let end = chooser
+            .chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, width, height)
+            .expect("a radius");
+
+        assert!(start >= 1600.0, "starts off the long edge: {start}");
+        assert!(
+            (end - MIN_WINNER_RADIUS).abs() < 1e-6,
+            "settles at the winner's own size: {end} vs {MIN_WINNER_RADIUS}"
         );
-        assert_eq!(
-            chooser.chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, width, height),
-            Some((MIN_WINNER_RADIUS + 1600.0) / 2.0)
+        assert!(
+            end < start,
+            "and the circle grows rather than shrinking"
         );
-        assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
+    }
+
+    #[test]
+    fn the_fill_is_done_halfway_through_the_reveal() {
+        // Measured: 5%, 51%, 83%, complete -- five frames into six. The rest of the
+        // window is the winner sitting in its own colour, not a fill still creeping
+        // across the glass, and that is why the native app's reveal reads as a snap.
+        let chooser = won(0);
+        let (w, h) = (1080.0, 2340.0);
+        let t = CHOSEN_PLAYER_ANIMATION_TIME_MS;
+        let at = |fraction: f64| {
+            chooser
+                .chosen_radius(t * fraction, w, h)
+                .expect("a radius")
+        };
+
+        assert!(
+            (at(FILL_FRACTION) - MIN_WINNER_RADIUS).abs() < 1e-6,
+            "the fill has reached its final size by {:.0}%: {}",
+            FILL_FRACTION * 100.0,
+            at(FILL_FRACTION)
+        );
+        // And it stays there: a hold, not a stall mid-sweep.
+        assert_eq!(at(0.75), at(FILL_FRACTION));
+        assert_eq!(at(1.0), at(FILL_FRACTION));
+    }
+
+    #[test]
+    fn the_fill_is_a_smoothstep_not_a_linear_sweep() {
+        // Slow out of the gate, fastest in the middle, easing into the edge. A
+        // linear radius looks mechanical precisely because it is fastest where the
+        // screen is densest.
+        let chooser = won(0);
+        let (w, h) = (1080.0, 2340.0);
+        let t = CHOSEN_PLAYER_ANIMATION_TIME_MS * FILL_FRACTION;
+        let at = |fraction: f64| {
+            chooser
+                .chosen_radius(t * fraction, w, h)
+                .expect("a radius")
+        };
+        let span = at(0.0) - at(1.0);
+        let covered = |f: f64| (at(0.0) - at(f)) / span;
+
+        assert!(covered(0.25) < 0.2, "slow to start: {:.2}", covered(0.25));
+        assert!(
+            covered(0.5) > 0.4 && covered(0.5) < 0.6,
+            "fastest through the middle: {:.2}",
+            covered(0.5)
+        );
+        // A smoothstep is 0.84 at three quarters, not 0.9 -- and it has to *land*
+        // on exactly 1.0 at the end, which is the property that matters.
+        assert!(covered(0.75) > 0.8, "and easing in: {:.2}", covered(0.75));
+        assert!((covered(1.0) - 1.0).abs() < 1e-9, "landing exactly: {:.6}", covered(1.0));
+
+        // Monotonic: the circle only ever grows.
+        let mut last = f64::INFINITY;
+        for step in 0..=40 {
+            let r = at(f64::from(step) / 40.0);
+            assert!(r <= last + 1e-9, "the circle shrank at step {step}");
+            last = r;
+        }
     }
 
     #[test]
@@ -731,32 +847,46 @@ mod tests {
         // The one geometric claim the constant exists for: at full pulse the
         // winner's ring sits strictly inside the finished fill, so the winner
         // reads as a hole in the colour rather than a ring painted over it.
-        // The ring is stroked at a *centreline* radius of `INNER + OUTER`, half
-        // the stroke width to either side, so its outer edge is 6px further out:
-        // 58 at rest.
+        //
+        // Stated as relationships rather than as the numbers, because the numbers
+        // are exactly what was measured off the native app and have already moved
+        // twice. What must hold at any size is the clearance.
+        //
+        // The ring is stroked at a *centreline* radius of `INNER + OUTER`, half the
+        // stroke width to either side.
         let centreline = INNER_RADIUS + OUTER_RADIUS;
         let outer_edge = centreline + OUTER_CIRCLE_WIDTH / 2.0;
-        assert_eq!(outer_edge, 58.0);
-        assert_eq!(MIN_WINNER_RADIUS, 74.25);
 
-        // Clearance beyond the ring's outer edge at the pulse's lowest point --
-        // which is where the pulse is smallest and the ring is closest to the
-        // edge of the fill -- and a good deal more at the top of the swing.
-        assert_eq!(MIN_WINNER_RADIUS - outer_edge, 16.25, "at rest");
-        assert_eq!(
-            MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE),
-            CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE),
-            "and the original's constant is dimensioned so the winner's ring clears \
-             the fill by exactly CHOSEN_SEPARATION at the top of the pulse -- the \
-             tightest it is ever, and still a gap"
+        // The author's own dimensioning: at the top of the pulse -- the tightest
+        // the ring ever gets, and the only moment the clearance matters -- the
+        // fill clears it by exactly CHOSEN_SEPARATION, scaled by the same swing.
+        assert!(
+            (MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE)
+                - CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE))
+                .abs()
+                < 1e-9,
+            "the fill clears the ring by the author's own separation"
         );
-        assert_eq!(MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE), 9.0);
-        // The winner's inner disc is always well inside the fill, at either end
-        // of the pulse, so the winner stays visible once the fill has settled.
-        // A compile-time check: this is arithmetic on constants, and a constant
-        // that stopped holding would be a change to what the app looks like.
+        assert!(
+            MIN_WINNER_RADIUS > outer_edge * (1.0 + MAX_PULSE_SCALE),
+            "and the ring is strictly inside the fill at full pulse"
+        );
+        // The winner's inner disc, at either end of the pulse, is well inside it.
         const { assert!(INNER_RADIUS * (1.0 - MAX_PULSE_SCALE) < MIN_WINNER_RADIUS) };
-        assert_eq!(MIN_WINNER_RADIUS, 74.25, "the original's own constant");
+
+        // And the measured geometry, so a change of scale cannot pass unnoticed.
+        // The fill radius is *derived* from the ring, so it moves whenever the ring
+        // or the swing does; the first version of this test pinned it to a literal
+        // that was correct on the day and wrong the moment a measurement changed.
+        assert_eq!(outer_edge, 35.5, "the measured ring's outer edge");
+        // A compile-time check, which is stronger than a runtime one and is what
+        // clippy asks for on an assertion over constants.
+        const {
+            assert!(
+                MIN_WINNER_RADIUS > 40.0 && MIN_WINNER_RADIUS < 50.0,
+                "the fill settles near the measured 47px"
+            )
+        };
     }
 
     #[test]

@@ -42,7 +42,7 @@ body { color: #fff; }
   <strong>Chwazi could not start.</strong>
   <span>Chwazi could not start. Reload the page, or check your connection.</span>
 </div>
-<noscript><div id="nojs"><style>#error { display: flex; }</style><strong>Chwazi could not start.</strong><span>Put two or more fingers on the screen and it picks one at random.</span></div></noscript>
+<noscript><div id="nojs"><style>#error { display: flex; }</style><strong>Chwazi could not start.</strong><span>Reload the page, or check your connection.</span></div></noscript>
 <script type="module">
 import('./app.js').then(m => m.default()).catch(() => { document.getElementById('status').textContent = 'Chwazi could not start.'; document.getElementById('error').hidden = false; document.getElementById('error').lastElementChild.textContent = 'Chwazi could not start. Reload the page, or check your connection.'; });
 </script>

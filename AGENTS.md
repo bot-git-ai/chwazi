@@ -78,27 +78,46 @@ Everything the shell references is relative (`./app.js`,
 `new URL('./', self.location.href)`, `start_url: "./"`), so one build works from
 any subdirectory.
 
-## Timings
+## Timings and sizes, measured
 
-These are the original's, unchanged, and they are the reason the app feels the
-way it does. They are listed here because a rewrite is exactly when they quietly
-get "improved", and on this app every one of them is the feel:
+These are **measured off screen recordings of the native app**, not chosen. Where
+each number came from is recorded, because a number nobody can re-derive is a
+number nobody can correct.
 
-| | |
-|---|---|
-| `SCALING_PERIOD_MS` = 1500 | one breath of the pulse, per the original |
-| `DRAWING_TIME_MS` = 2500 | how long the players present get to be picked |
-| `CHOSEN_PLAYER_ANIMATION_TIME_MS` = 1000 | the winner's colour flooding the screen |
-| `RESTART_DELAY` = 2000 | after the winner lifts, before the next draw |
+| | value | measured from |
+|---|---|---|
+| `SCALING_PERIOD_MS` | 1000 | pixel area peaks at 1.07s, 2.03s, 3.03s, 4.03s → 0.99s apart |
+| `MAX_PULSE_SCALE` | 0.07 | area varies 1.33:1; area ∝ r², so the radius swings 1.15:1 |
+| `INNER_RADIUS` | 23 | the filled disc is 139 native px across on a 1080px/3x screen |
+| `OUTER_CIRCLE_WIDTH` | 5 | the native ring is a hairline outline, not a 12px band |
+| `CHOSEN_PLAYER_ANIMATION_TIME_MS` | 180 | the fill is complete 5 frames into 6 at 60fps |
+| `FILL_FRACTION` | 0.5 | same: 5%, 51%, 83%, done — done by the halfway point |
+| `DRAWING_TIME_MS` | 2500 | the original's, kept |
+| `RESTART_DELAY` | 2000 | the original's, kept |
+
+The two that changed most are the pulse and the reveal, and both changed for the
+same reason: the original's values are a third to a quarter again as slow as the
+app people actually use.
+
+**The reveal is a smoothstep over the first half, then a hold.** Measured 5%, 51%,
+83%, complete across five frames — so the fill is done at the halfway point and
+the rest of the window is the winner resting in its own colour. That is why the
+native one reads as a snap rather than a sweep, and it is not something a shorter
+duration alone would have got: a *linear* radius is fastest exactly where the
+screen is densest, so it appears to stall halfway.
+
+`MIN_WINNER_RADIUS` is derived from the ring rather than carried over, so it moves
+whenever the ring or the swing does. Its one invariant is the author's: at the top
+of the pulse the fill clears the winner's own ring by exactly `CHOSEN_SEPARATION`.
 
 A circle appears on the frame after `pointerdown` — the same frame the original
 drew it on, because the original also mutated its map in the event handler and
 drew on the next `requestAnimationFrame`. Nothing is deferred, queued or
 throttled between a finger landing and its circle.
 
-The two notes below that look like caveats about speed are not: `reduced-motion`
-is about *whether* the pulse runs, not how fast, and the pulse's rate is the
-original's 1500ms in either case.
+The note below that looks like a caveat about speed is not: `reduced-motion` is
+about *whether* the pulse runs, not how fast, and the pulse's rate is the same in
+either case.
 
 ## The icon
 

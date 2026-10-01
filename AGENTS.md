@@ -89,9 +89,11 @@ number nobody can correct.
 | `SCALING_PERIOD_MS` | 1000 | pixel area peaks at 1.07s, 2.03s, 3.03s, 4.03s → 0.99s apart |
 | `MAX_PULSE_SCALE` | 0.07 | area varies 1.33:1; area ∝ r², so the radius swings 1.15:1 |
 | whole mark | 80 CSS px across | a player circle is 241 native px on a 1080px/3x screen |
-| `INNER_RADIUS` | 25 | the disc inside that 80px mark |
-| `OUTER_RADIUS` | 9 | to the ring's *centreline*; the black gap is `9 - 6` = 3px |
-| `OUTER_CIRCLE_WIDTH` | 12 | the original's, and it was right |
+| `MARK_RADIUS` | 40 | that circle's outer edge, measured on every clean frame |
+| `DOT_RADIUS` | 6.5 | the pale dot at its centre, measured the same way |
+| `DOT_COLOUR` | rgb(251,242,186) | sampled from the dot itself |
+| `COLOUR_LIGHTNESS` | 49% | median over 1184 saturated pixels; the web app's 40% |
+| `ARC_WIDTH` | 12 | the original's, unchanged |
 | `CHOSEN_PLAYER_ANIMATION_TIME_MS` | 180 | the fill is complete 5 frames into 6 at 60fps |
 | `FILL_FRACTION` | 0.5 | same: 5%, 51%, 83%, done — done by the halfway point |
 | `DRAWING_TIME_MS` | 2500 | the original's, kept |
@@ -101,14 +103,26 @@ The two that changed most are the pulse and the reveal, and both changed for the
 same reason: the original's values are a third to a quarter again as slow as the
 app people actually use.
 
-**The mark is a disc, a black gap, and a ring.** That structure is not cosmetic and
-getting it wrong is invisible in the constants. `OUTER_RADIUS` is the distance from
-the disc's edge to the ring's centreline, so the black band between the two shapes
-is `OUTER_RADIUS - OUTER_CIRCLE_WIDTH / 2` — here 3px. Painted edge to edge in one
-colour the disc and the ring merge, and the mark stops reading as a circle at all.
-An intermediate build did exactly that, and the recording of it showed a plain
-coloured blob: what looked like "too small" was mostly "no structure".
-`tests/shell.rs` pins the draw order and the gap.
+**The mark is a solid disc with a pale dot at its centre.** That is all of it: no
+gap, no separate ring, and the colour runs unbroken from 13 to 36 CSS px with black
+outside 40.
+
+Two builds have now got this wrong, in opposite directions, and both were caught by
+the recordings rather than by reasoning. The first merged a disc and a ring painted
+edge to edge in one colour, which is a blob. The second "fixed" that by inserting a
+3px black gap and a separate ring -- which the native app does not have either; I had
+read them off a blurred 340px crop of a frame where two circles happened to overlap.
+
+The white dot is what settled it, and for a reason worth keeping: it gives a frame
+of video an unambiguous centre to scan radially from. Scanning out from the dot
+shows one solid disc and nothing else, which no amount of squinting at a thumbnail
+had managed to establish.
+
+The dot is also why it *looks* the way it does rather than merely measuring right: a
+disc of colour with a bright centre reads as a bead of light, which on a black screen
+is the whole impression. `tests/shell.rs` pins the draw order, the sizes, the
+lightness, and the absence of `destination-out` -- so a ring that comes back as a
+draw call rather than as a constant cannot slip through.
 
 **Smoothness is resolution, not anti-aliasing.** The canvas is sized to
 `innerWidth × devicePixelRatio` (capped at 3) and drawn through a transform of the

@@ -31,44 +31,49 @@ use std::collections::BTreeMap;
 
 /// A draw needs at least this many players. One finger cannot choose itself.
 pub const REQUIRED_PLAYER_COUNT: usize = 2;
-/// Radius of the solid inner disc.
+
+/// Radius of the whole mark, outer edge.
 ///
-/// Measured by putting the two apps side by side on the same phone and the same
-/// frame size. A single circle is 241x241 native pixels in the native app's
-/// recording and 145x141 in mine -- so the native mark is **80 CSS px across
-/// against my 48**. That is the whole of the sizing error: I had been measuring the
-/// *inner solid core* (46px) and calling it the circle, when the circle the eye
-/// reads is the ring's outside, 80px.
+/// 40 CSS px -- 80 across -- measured on every clean frame of every native
+/// recording, on a 1080px-wide Galaxy S25 at 3x. This is the number that was
+/// right in the last build and is unchanged here; the errors were the *structure*
+/// inside it and the colour it is filled with, not its size.
+pub const MARK_RADIUS: f64 = 40.0;
+
+/// Radius of the pale dot at the centre of every mark.
 ///
-/// 40 is the native app's radius to within a pixel, and it is very nearly the
-/// original web app's own 36 -- so the original was never too big either, and the
-/// size should not have been reduced at all. What is reduced is the *ring width*,
-/// which is the visible difference: the original's 12px band is heavy at this size,
-/// and the native app's is a hairline.
-pub const INNER_RADIUS: f64 = 25.0;
-/// Gap between the inner disc and the outer ring's centreline.
+/// Measured at 6.3 CSS px on a clean frame, about a sixth of the mark's radius.
 ///
-/// Distance from the disc's edge to the *ring's centreline*.
+/// This app has never drawn it, and it is the most distinctive thing about the
+/// native app's mark: a disc of colour with a bright centre reads as a bead of
+/// light, which on a black screen is what makes it look lit rather than flat. It is
+/// also the only reliable way to find a circle's centre in a frame of video,
+/// which is how it is measured.
+pub const DOT_RADIUS: f64 = 6.5;
+
+/// The dot's colour: a warm off-white, not pure white.
 ///
-/// This is not the gap -- the gap is this minus half the ring's width, and getting
-/// that subtraction wrong is what made the last build draw a disc and a ring in the
-/// same colour touching edge to edge, which is one blob and not a mark at all.
+/// Sampled from the recording at rgb(251,242,186). Pure #fff against a saturated
+/// mark reads as a hole punched through the screen; this is the softer value the
+/// native app actually paints.
+pub const DOT_COLOUR: &str = "rgb(251, 242, 186)";
+
+/// Width of the white arc that sweeps a mark's edge while the draw runs.
 ///
-/// The mark is a saturated disc, then a band of black, then a ring of the same
-/// colour outside it: 25 + 10 = 35 is the ring's centreline, its band runs 29..41,
-/// and the 4px of black between 25 and 29 is the separation that makes the two
-/// shapes read as two shapes. The original's 16 here, against a 36 disc, left the
-/// ring floating much further out and the mark much fatter overall.
-pub const OUTER_RADIUS: f64 = 9.0;
-/// Stroke width of the outer ring.
+/// The original's 12, which is the one constant from the original app that the
+/// recordings support unchanged.
+pub const ARC_WIDTH: f64 = 12.0;
+
+/// Lightness of a player's colour, as a percentage.
 ///
-/// Stroke width of the outer ring.
+/// The original web formula is `hsl(h, 100%, 40%)`. Sampled across 1184 saturated
+/// pixels from two native recordings, the native app's median lightness is 49% --
+/// nine points lighter, which is plainly visible side by side, and part of why the
+/// mark looked heavier and darker than the app it was meant to be.
 ///
-/// The original's 12, and after measuring the native app's recordings at full
-/// resolution it is the one constant that was right all along: its ring really is
-/// about 12 native px on each side. The size error was upstream of this -- I had
-/// shrunk the disc by half and the ring with it -- and not here.
-pub const OUTER_CIRCLE_WIDTH: f64 = 12.0;
+/// The hue formula is untouched: it spreads pointer ids around the wheel exactly as
+/// it always has, and this constant is the only thing that changed in `Player::color`.
+pub const COLOUR_LIGHTNESS: f64 = 49.0;
 /// How far a player circle's radius swings, in each direction, around its rest
 /// size.
 ///
@@ -106,24 +111,13 @@ pub const CHOSEN_SEPARATION: f64 = 8.0;
 /// How long the chosen finger must be off the glass before the app resets.
 pub const RESTART_DELAY: f64 = 2000.0;
 
-/// Radius of the winner's circle when its expansion has finished.
+/// Radius the winner's circle takes when its expansion has finished.
 ///
-/// The original's own constant, carried over arithmetic for arithmetic: 74.25.
-/// Its evident intent holds exactly. The winner's ring is stroked at a
-/// centreline radius of 52 with a 12px stroke, so its outer edge is 58, which
-/// the pulse swings to 65.25 at its largest -- and the fill stops at 74.25,
-/// leaving precisely the 8px `CHOSEN_SEPARATION` the author asked for at the
-/// tightest point of the breath, and 16.25 at rest. The winner is a hole in the
-/// colour and never touches it.
-///
-/// It is kept rather than "corrected" because a rewrite keeps the author's
-/// numbers, and here they were right. `the_winner_radius_clears_the_winners_own_ring`
-/// pins all of it.
-pub const MIN_WINNER_RADIUS: f64 = (INNER_RADIUS
-    + OUTER_RADIUS
-    + OUTER_CIRCLE_WIDTH / 2.0
-    + CHOSEN_SEPARATION)
-    * (1.0 + MAX_PULSE_SCALE);
+/// Derived from the mark rather than carried over as a literal. The original's
+/// 74.25 was its 58px outer edge plus the author's 8px of separation, scaled by
+/// the pulse's swing; the mark is 40 now, so the same intent gives this. It moves
+/// whenever the mark does, which is the only way it can be trusted.
+pub const WINNER_RADIUS: f64 = (MARK_RADIUS + CHOSEN_SEPARATION) * (1.0 + MAX_PULSE_SCALE);
 
 /// One finger on the glass.
 #[derive(Debug, Clone, PartialEq)]
@@ -154,7 +148,7 @@ impl Player {
     /// stays inside 0..360 and does not depend on the browser doing it.
     pub fn color(id: i32) -> String {
         let hue = (f64::from(id) * 223.0 + 263.0).rem_euclid(360.0);
-        format!("hsl({hue:.0}, 100%, 40%)")
+        format!("hsl({hue:.0}, 100%, {COLOUR_LIGHTNESS:.0}%)")
     }
 
     /// The CSS colour this player is drawn in.
@@ -365,7 +359,7 @@ impl Chooser {
 
     /// The winner's circle radius at `timestamp`, given the viewport size.
     ///
-    /// Grows from off-screen down to [`MIN_WINNER_RADIUS`], on an ease-out.
+    /// Grows from off-screen down to [`WINNER_RADIUS`], on an ease-out.
     ///
     /// The shape is measured, and it matters more than the duration. Frame by
     /// frame from a recording, the fill covers 3% of the crop, then 12%, 33%, 65%,
@@ -379,8 +373,8 @@ impl Chooser {
     /// remaining distance decays by a constant fraction per unit time.
     pub fn chosen_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
-        let from = width.max(height).max(MIN_WINNER_RADIUS);
-        let span = from - MIN_WINNER_RADIUS;
+        let from = width.max(height).max(WINNER_RADIUS);
+        let span = from - WINNER_RADIUS;
         // A smoothstep over the *first half* of the animation, then held.
         //
         // Measured frame by frame: the fill is 5% of the crop after one frame, 51%
@@ -682,10 +676,13 @@ mod tests {
 
     #[test]
     fn colours_spread_around_the_hue_wheel() {
-        // hsl() of the hue the original computed, with the modulo the original
-        // left to the browser. Pointer 1 is green; the neighbours are far apart.
-        assert_eq!(Player::color(1), "hsl(126, 100%, 40%)");
-        assert_eq!(Player::color(0), "hsl(263, 100%, 40%)");
+        // The hue formula is the original's, unchanged, with the modulo the
+        // original left to the browser. Pointer 1 is green; the neighbours are far
+        // apart. The lightness is the one thing that moved: 40% was the web app's,
+        // and the native app's median is 49% across 1184 sampled pixels.
+        assert_eq!(Player::color(1), "hsl(126, 100%, 49%)");
+        assert_eq!(Player::color(0), "hsl(263, 100%, 49%)");
+        assert_eq!(COLOUR_LIGHTNESS, 49.0, "the measured native lightness");
         for id in 1..12 {
             let colour = Player::color(id);
             assert!(colour.starts_with("hsl("), "{colour} is a CSS colour");
@@ -777,8 +774,8 @@ mod tests {
 
         assert!(start >= 1600.0, "starts off the long edge: {start}");
         assert!(
-            (end - MIN_WINNER_RADIUS).abs() < 1e-6,
-            "settles at the winner's own size: {end} vs {MIN_WINNER_RADIUS}"
+            (end - WINNER_RADIUS).abs() < 1e-6,
+            "settles at the winner's own size: {end} vs {WINNER_RADIUS}"
         );
         assert!(
             end < start,
@@ -801,7 +798,7 @@ mod tests {
         };
 
         assert!(
-            (at(FILL_FRACTION) - MIN_WINNER_RADIUS).abs() < 1e-6,
+            (at(FILL_FRACTION) - WINNER_RADIUS).abs() < 1e-6,
             "the fill has reached its final size by {:.0}%: {}",
             FILL_FRACTION * 100.0,
             at(FILL_FRACTION)
@@ -849,43 +846,55 @@ mod tests {
 
     #[test]
     fn the_winner_radius_never_collapses_on_a_tiny_screen() {
-        // The starting radius is at least `MIN_WINNER_RADIUS`, so a very small
+        // The starting radius is at least `WINNER_RADIUS`, so a very small
         // viewport does not make the circle shrink as it grows in.
         let mut chooser = drawing();
         chooser.draw(0.0, 0);
         assert_eq!(
             chooser.chosen_radius(0.0, 10.0, 10.0),
-            Some(MIN_WINNER_RADIUS)
+            Some(WINNER_RADIUS)
         );
     }
 
     #[test]
-    fn the_ring_does_not_touch_the_disc() {
-        // The bug this whole measurement exercise turned up. `OUTER_RADIUS` is the
-        // distance from the disc's edge to the ring's *centreline*, so the black
-        // band between the two shapes is `OUTER_RADIUS - WIDTH/2` -- and if that
-        // is zero or negative the ring is painted straight onto the disc's edge.
-        // Painted in the same colour, that is not a small imperfection: the two
-        // shapes merge and the mark becomes a single blob with no structure at all.
-        let black_gap = OUTER_RADIUS - OUTER_CIRCLE_WIDTH / 2.0;
+    fn the_mark_is_a_solid_disc_with_a_dot() {
+        // The structure, measured radially through the exact centre of a mark in
+        // the native recording (the centre being found by the dot itself): colour
+        // runs unbroken from 13 to 36 CSS px, with black outside 40. There is no
+        // gap and no separate ring, and an earlier build drew both.
+        //
+        // So the invariants are: one outer radius, a dot well inside it, and no
+        // ring or gap constants at all -- their absence is the point, and
+        // `tests/shell.rs` checks the drawing code does not reintroduce them.
+        assert_eq!(MARK_RADIUS, 40.0, "80 CSS px across, measured");
+        // Compile-time, because these are arithmetic on constants: a measurement
+        // that changes has to fail here rather than quietly ship a different mark.
+        const {
+            assert!(
+                DOT_RADIUS < MARK_RADIUS * 0.3,
+                "the dot is about a sixth of the mark"
+            )
+        };
+        const { assert!(DOT_RADIUS > 0.0, "and there is a dot to see") };
+    }
+
+    #[test]
+    fn the_winner_radius_clears_the_marks_edge() {
+        // The one geometric claim the constant exists for: at full pulse the
+        // winner's own mark sits strictly inside the finished fill, so the winner
+        // reads as a hole in the colour rather than a mark painted over it.
+        let outer = MARK_RADIUS * (1.0 + MAX_PULSE_SCALE);
         assert!(
-            black_gap > 1.0,
-            "there must be a visible band of black between the disc and the ring, \
-             and there is {black_gap}px"
+            WINNER_RADIUS > outer,
+            "the fill at {WINNER_RADIUS} must clear the mark at {outer}"
         );
-        // And it has to be wide enough to survive being drawn at 3x and scaled
-        // back down, which is what the eye actually sees.
+        // And it clears it by the author's own separation, scaled by the same swing.
         assert!(
-            black_gap >= 3.0,
-            "a {black_gap}px gap disappears on a high-density screen; 3px is the \
-             minimum that reads"
+            (WINNER_RADIUS - outer - CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE)).abs() < 1e-9,
+            "by exactly CHOSEN_SEPARATION"
         );
-        // The two shapes do not overlap at all.
-        let ring_inner = INNER_RADIUS + black_gap;
-        assert!(
-            ring_inner > INNER_RADIUS,
-            "the ring's inner edge ({ring_inner}) must be outside the disc ({INNER_RADIUS})"
-        );
+        // The dot is well inside the fill too, so the winner stays a bead of light.
+        const { assert!(DOT_RADIUS * (1.0 + MAX_PULSE_SCALE) < WINNER_RADIUS) };
     }
 
     #[test]
@@ -893,60 +902,6 @@ mod tests {
         let chooser = drawing();
         assert_eq!(chooser.chosen_radius(0.0, 800.0, 800.0), None);
         assert_eq!(chooser.chosen_progress(0.0), None);
-    }
-
-    #[test]
-    fn the_winner_radius_clears_the_winners_own_ring() {
-        // The one geometric claim the constant exists for: at full pulse the
-        // winner's ring sits strictly inside the finished fill, so the winner
-        // reads as a hole in the colour rather than a ring painted over it.
-        //
-        // Stated as relationships rather than as the numbers, because the numbers
-        // are exactly what was measured off the native app and have already moved
-        // twice. What must hold at any size is the clearance.
-        //
-        // The ring is stroked at a *centreline* radius of `INNER + OUTER`, half the
-        // stroke width to either side.
-        let centreline = INNER_RADIUS + OUTER_RADIUS;
-        let outer_edge = centreline + OUTER_CIRCLE_WIDTH / 2.0;
-
-        // The author's own dimensioning: at the top of the pulse -- the tightest
-        // the ring ever gets, and the only moment the clearance matters -- the
-        // fill clears it by exactly CHOSEN_SEPARATION, scaled by the same swing.
-        assert!(
-            (MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE)
-                - CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE))
-                .abs()
-                < 1e-9,
-            "the fill clears the ring by the author's own separation"
-        );
-        assert!(
-            MIN_WINNER_RADIUS > outer_edge * (1.0 + MAX_PULSE_SCALE),
-            "and the ring is strictly inside the fill at full pulse"
-        );
-        // The winner's inner disc, at either end of the pulse, is well inside it.
-        const { assert!(INNER_RADIUS * (1.0 - MAX_PULSE_SCALE) < MIN_WINNER_RADIUS) };
-
-        // And the measured geometry, so a change of scale cannot pass unnoticed.
-        // The fill radius is *derived* from the ring, so it moves whenever the ring
-        // or the swing does; the first version of this test pinned it to a literal
-        // that was correct on the day and wrong the moment a measurement changed.
-        assert_eq!(outer_edge, 40.0, "the measured ring's outer edge, 80 across");
-        // The measured outer edge, and the fill that has to clear it. The check on
-        // the edge is compile-time, because it is arithmetic on constants; the one
-        // on the fill needs `outer_edge`, so it runs here.
-        const {
-            assert!(
-                INNER_RADIUS + OUTER_RADIUS + OUTER_CIRCLE_WIDTH / 2.0 == 40.0,
-                "the ring's outer edge is the measured 40 CSS px radius (80 across)"
-            )
-        };
-        const {
-            assert!(
-                MIN_WINNER_RADIUS > 50.0 && MIN_WINNER_RADIUS < 65.0,
-                "and the fill settles just clear of it, near 57"
-            )
-        };
     }
 
     #[test]

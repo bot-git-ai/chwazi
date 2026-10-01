@@ -309,71 +309,56 @@ fn draw_player(
     loading: f64,
 ) {
     let colour = player.color_of();
-    // The ring is drawn at the ring's own centreline, and `OUTER_RADIUS` is the
-    // black gap it leaves between itself and the disc -- not merely a radius. That
-    // gap is the whole of why the mark reads as a disc *inside* a ring rather than
-    // as one flat blob: painted the same colour and touching, the two shapes
-    // disappear into each other. The native app's recordings show it plainly: a
-    // saturated disc, a band of black, then a ring of the same colour outside it.
-    let ring_radius = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * pulse;
-    let ring_width = chooser::OUTER_CIRCLE_WIDTH * pulse;
+    // A solid disc with a pale dot at its centre. That is the whole mark.
+    //
+    // The previous version drew a disc, a black gap and a separate ring. A radial
+    // scan through the exact centre of a mark in the native recording -- located by
+    // the dot itself -- shows the colour running unbroken from 13 to 36 CSS px
+    // with nothing outside it, so the gap and the ring were invented from a blurred
+    // screenshot and do not exist in the app being matched.
+    let radius = chooser::MARK_RADIUS * pulse;
 
     context.begin_path();
     // `arc` on the 2d context is fallible in web-sys's bindings and infallible in
-    // the browser -- a radius that is not finite throws there. `arc` is the one
-    // call whose failure would end the frame, so it is checked; the others are
-    // not, because no number that reaches them can be non-finite.
-    if let Err(error) = context.arc(
-        player.x,
-        player.y,
-        chooser::INNER_RADIUS * pulse,
-        0.0,
-        TWO_PI,
-    ) {
+    // the browser -- a radius that is not finite throws there. It is the one call
+    // whose failure would end the frame, so it is checked; the others are not,
+    // because no number that reaches them can be non-finite.
+    if let Err(error) = context.arc(player.x, player.y, radius, 0.0, TWO_PI) {
         show_failure(&describe(&error));
         return;
     }
     context.set_fill_style_str(&colour);
     context.fill();
 
-    // Order matters and is the whole of the mark: disc, then punch the ring's band
-    // out to black, then stroke the ring. Painting the disc last would cover the
-    // ring's inner half and close the gap again, which is what an earlier version
-    // effectively did -- leaving one solid blob in the player's colour.
-    //
-    // `destination-out` is used rather than simply drawing the gap in black, so
-    // that the gap punches through *whatever is underneath*, which matters once
-    // the winner's colour is flooding the screen behind the circle.
-    context.save();
-    let _ = context.set_global_composite_operation("destination-out");
+    // The dot. Drawn in the mark's own pulse, so it breathes with everything else.
     context.begin_path();
-    if context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI).is_ok() {
-        context.set_line_width(ring_width);
-        context.set_stroke_style_str("#000000");
-        context.stroke();
-    }
-    context.restore();
-
-    context.begin_path();
-    if context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI).is_ok() {
-        context.set_line_width(ring_width);
-        context.set_stroke_style_str(&colour);
-        context.stroke();
+    if context
+        .arc(
+            player.x,
+            player.y,
+            chooser::DOT_RADIUS * pulse,
+            0.0,
+            TWO_PI,
+        )
+        .is_ok()
+    {
+        context.set_fill_style_str(chooser::DOT_COLOUR);
+        context.fill();
     }
 
-    // The arc spans from `2*PI*(1-loading)/2` to `2*PI*(1-loading)*3/2`: a gap of
-    // a quarter turn at the start of the window, closing to nothing by the end,
-    // and the whole ring when no window is running at all.
+    // The loading arc sweeps the mark's edge while the draw runs: a gap of a
+    // quarter turn at the start of the window, closing to nothing by the end, and
+    // the whole circle when no window is running at all.
     let remaining = 1.0 - loading;
     context.begin_path();
     let _ = context.arc(
         player.x,
         player.y,
-        ring_radius,
+        radius,
         TWO_PI * remaining / 2.0,
         TWO_PI * remaining * 3.0 / 2.0,
     );
-    context.set_line_width(ring_width);
+    context.set_line_width(chooser::ARC_WIDTH * pulse);
     context.set_stroke_style_str(LOADING_COLOR);
     context.stroke();
 }

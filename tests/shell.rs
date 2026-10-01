@@ -530,62 +530,86 @@ fn string_literals(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// The circle is drawn as a disc, a black gap, and a ring -- in that order.
+/// The mark is a solid disc with a pale dot -- and no gap, no ring.
 ///
-/// This is the one structural property the whole geometry hangs off, and it is
-/// invisible in a constant and obvious on a phone. `OUTER_RADIUS` is the distance
-/// from the disc's edge to the ring's *centreline*, so the black band between them
-/// is `OUTER_RADIUS - OUTER_CIRCLE_WIDTH / 2`. Draw the ring first and the disc
-/// after and the gap closes; the two shapes are the same colour, so the result is
-/// one flat blob and the mark stops reading as a circle at all.
+/// Measured radially through the exact centre of a mark in the native recording,
+/// with the centre located by the dot itself (which is also why the dot matters:
+/// it is the only unambiguous centre in a frame of video): the colour runs
+/// unbroken from 13 to 36 CSS px and there is black outside 40.
+///
+/// An earlier build drew a disc, a 3px black gap and a separate ring, read off a
+/// blurred 340px crop of a frame where two circles happened to overlap. Neither
+/// the gap nor the ring exists in the app. This test is the guard against putting
+/// them back, and it checks the drawing code as well as the constants -- a ring
+/// that comes back as a draw call rather than as a constant would otherwise sail
+/// straight through.
 #[test]
-fn the_ring_is_drawn_outside_the_disc_with_a_gap() {
+fn the_mark_is_a_solid_disc_with_a_dot_and_no_gap() {
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
-    let disc = ui.find("chooser::INNER_RADIUS * pulse").expect("a disc");
-    let punch = ui
-        .find("destination-out")
-        .expect("the gap must be punched out, not painted over");
-    let ring = ui
-        .find("set_stroke_style_str(&colour)")
-        .expect("the ring is stroked in the player's colour");
+
+    // Scoped to the drawing function: `LOADING_COLOR` is declared at the top of
+    // the file, so searching the whole file for it finds the declaration and every
+    // offset after it compares wrong.
+    let draw = ui
+        .split("fn draw_player(")
+        .nth(1)
+        .expect("draw_player")
+        .split("\n}\n")
+        .next()
+        .expect("the end of the function");
+
+    let disc = draw.find("MARK_RADIUS * pulse").expect("the disc");
+    let dot = draw.find("DOT_RADIUS * pulse").expect("the dot");
+    let arc = draw.find("LOADING_COLOR").expect("the loading arc");
     assert!(
-        disc < punch && punch < ring,
-        "draw order must be disc ({disc}), then the gap ({punch}), then the ring \
-         ({ring})"
+        disc < dot && dot < arc,
+        "draw order must be disc ({disc}), dot ({dot}), loading arc ({arc})"
     );
-    // And the sizes, so a future change of scale cannot quietly close the gap.
+
+    // And none of the shapes that do not exist -- anywhere, not only here.
+    for invented in ["destination-out", "OUTER_RADIUS", "OUTER_CIRCLE_WIDTH"] {
+        assert!(
+            !ui.contains(invented),
+            "{invented:?} draws a gap or a ring that the native app does not have"
+        );
+    }
+
+    // The sizes, measured on a 1080px-wide S25 at 3x.
     let chooser = std::fs::read_to_string(root().join("src/chooser.rs")).expect("chooser.rs");
-    let inner: f64 = chooser
-        .lines()
-        .find_map(|line| line.strip_prefix("pub const INNER_RADIUS: f64 = "))
-        .and_then(|rest| rest.split(';').next())
-        .and_then(|n| n.trim().parse().ok())
-        .expect("INNER_RADIUS");
-    let gap: f64 = chooser
-        .lines()
-        .find_map(|line| line.strip_prefix("pub const OUTER_RADIUS: f64 = "))
-        .and_then(|rest| rest.split(';').next())
-        .and_then(|n| n.trim().parse().ok())
-        .expect("OUTER_RADIUS");
-    let width: f64 = chooser
-        .lines()
-        .find_map(|line| line.strip_prefix("pub const OUTER_CIRCLE_WIDTH: f64 = "))
-        .and_then(|rest| rest.split(';').next())
-        .and_then(|n| n.trim().parse().ok())
-        .expect("OUTER_CIRCLE_WIDTH");
+    let constant = |name: &str| -> f64 {
+        chooser
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("pub const {name}: f64 = ")))
+            .and_then(|rest| rest.split(';').next())
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    let mark = constant("MARK_RADIUS");
+    let dot = constant("DOT_RADIUS");
     assert!(
-        gap - width / 2.0 >= 3.0,
-        "the black gap is {}px; below 3px it vanishes on a 3x screen",
-        gap - width / 2.0
+        (mark - 40.0).abs() < 0.5,
+        "the mark is {mark} CSS px in radius; measured 40"
     );
-    // The measured whole mark: 80 CSS px across on a 360px-wide phone.
-    let outer = inner + gap + width / 2.0;
     assert!(
-        (outer - 40.0).abs() < 1.5,
-        "the finished mark is {}px across; the native app measures 80",
-        outer * 2.0
+        (dot - 6.5).abs() < 0.5,
+        "the dot is {dot} CSS px in radius; measured 6.3"
     );
-    assert!(inner > 0.0, "and there is a disc to see");
+    // The dot is what makes it read as lit rather than flat, so it must be
+    // clearly visible and clearly separate from the edge.
+    assert!(dot > 3.0, "a dot under 3px disappears on a high-density screen");
+    assert!(dot < mark / 3.0, "and it must not crowd the edge");
+
+    // The colour, measured over 1184 saturated pixels from two native recordings.
+    let lightness = constant("COLOUR_LIGHTNESS");
+    assert!(
+        (lightness - 49.0).abs() < 1.0,
+        "lightness is {lightness}%; the native median is 49%, and the web app's 40% \
+         is nine points darker than what people are used to seeing"
+    );
+    assert!(
+        chooser.contains("DOT_COLOUR"),
+        "the dot's colour must be the sampled one, not a guess"
+    );
 }
 
 /// The start screen is bare.

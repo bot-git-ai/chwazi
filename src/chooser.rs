@@ -33,18 +33,42 @@ use std::collections::BTreeMap;
 pub const REQUIRED_PLAYER_COUNT: usize = 2;
 /// Radius of the solid inner disc.
 ///
-/// Measured off a screen recording of the native app rather than guessed: on a
-/// 1080px-wide phone at 3x, its filled disc is 139 native px across, which is 23
-/// CSS px of radius. The original's 36 was drawn for a screen nobody has used in
-/// years and is nearly half again as large.
-pub const INNER_RADIUS: f64 = 23.0;
+/// Measured by putting the two apps side by side on the same phone and the same
+/// frame size. A single circle is 241x241 native pixels in the native app's
+/// recording and 145x141 in mine -- so the native mark is **80 CSS px across
+/// against my 48**. That is the whole of the sizing error: I had been measuring the
+/// *inner solid core* (46px) and calling it the circle, when the circle the eye
+/// reads is the ring's outside, 80px.
+///
+/// 40 is the native app's radius to within a pixel, and it is very nearly the
+/// original web app's own 36 -- so the original was never too big either, and the
+/// size should not have been reduced at all. What is reduced is the *ring width*,
+/// which is the visible difference: the original's 12px band is heavy at this size,
+/// and the native app's is a hairline.
+pub const INNER_RADIUS: f64 = 25.0;
 /// Gap between the inner disc and the outer ring's centreline.
-pub const OUTER_RADIUS: f64 = 10.0;
+///
+/// Distance from the disc's edge to the *ring's centreline*.
+///
+/// This is not the gap -- the gap is this minus half the ring's width, and getting
+/// that subtraction wrong is what made the last build draw a disc and a ring in the
+/// same colour touching edge to edge, which is one blob and not a mark at all.
+///
+/// The mark is a saturated disc, then a band of black, then a ring of the same
+/// colour outside it: 25 + 10 = 35 is the ring's centreline, its band runs 29..41,
+/// and the 4px of black between 25 and 29 is the separation that makes the two
+/// shapes read as two shapes. The original's 16 here, against a 36 disc, left the
+/// ring floating much further out and the mark much fatter overall.
+pub const OUTER_RADIUS: f64 = 9.0;
 /// Stroke width of the outer ring.
 ///
-/// The native ring is thin -- a hairline outline rather than the original's 12px
-/// band, which at these radii is more than a quarter of the whole mark.
-pub const OUTER_CIRCLE_WIDTH: f64 = 5.0;
+/// Stroke width of the outer ring.
+///
+/// The original's 12, and after measuring the native app's recordings at full
+/// resolution it is the one constant that was right all along: its ring really is
+/// about 12 native px on each side. The size error was upstream of this -- I had
+/// shrunk the disc by half and the ring with it -- and not here.
+pub const OUTER_CIRCLE_WIDTH: f64 = 12.0;
 /// How far a player circle's radius swings, in each direction, around its rest
 /// size.
 ///
@@ -836,6 +860,35 @@ mod tests {
     }
 
     #[test]
+    fn the_ring_does_not_touch_the_disc() {
+        // The bug this whole measurement exercise turned up. `OUTER_RADIUS` is the
+        // distance from the disc's edge to the ring's *centreline*, so the black
+        // band between the two shapes is `OUTER_RADIUS - WIDTH/2` -- and if that
+        // is zero or negative the ring is painted straight onto the disc's edge.
+        // Painted in the same colour, that is not a small imperfection: the two
+        // shapes merge and the mark becomes a single blob with no structure at all.
+        let black_gap = OUTER_RADIUS - OUTER_CIRCLE_WIDTH / 2.0;
+        assert!(
+            black_gap > 1.0,
+            "there must be a visible band of black between the disc and the ring, \
+             and there is {black_gap}px"
+        );
+        // And it has to be wide enough to survive being drawn at 3x and scaled
+        // back down, which is what the eye actually sees.
+        assert!(
+            black_gap >= 3.0,
+            "a {black_gap}px gap disappears on a high-density screen; 3px is the \
+             minimum that reads"
+        );
+        // The two shapes do not overlap at all.
+        let ring_inner = INNER_RADIUS + black_gap;
+        assert!(
+            ring_inner > INNER_RADIUS,
+            "the ring's inner edge ({ring_inner}) must be outside the disc ({INNER_RADIUS})"
+        );
+    }
+
+    #[test]
     fn there_is_no_winner_radius_before_a_draw() {
         let chooser = drawing();
         assert_eq!(chooser.chosen_radius(0.0, 800.0, 800.0), None);
@@ -878,13 +931,20 @@ mod tests {
         // The fill radius is *derived* from the ring, so it moves whenever the ring
         // or the swing does; the first version of this test pinned it to a literal
         // that was correct on the day and wrong the moment a measurement changed.
-        assert_eq!(outer_edge, 35.5, "the measured ring's outer edge");
-        // A compile-time check, which is stronger than a runtime one and is what
-        // clippy asks for on an assertion over constants.
+        assert_eq!(outer_edge, 40.0, "the measured ring's outer edge, 80 across");
+        // The measured outer edge, and the fill that has to clear it. The check on
+        // the edge is compile-time, because it is arithmetic on constants; the one
+        // on the fill needs `outer_edge`, so it runs here.
         const {
             assert!(
-                MIN_WINNER_RADIUS > 40.0 && MIN_WINNER_RADIUS < 50.0,
-                "the fill settles near the measured 47px"
+                INNER_RADIUS + OUTER_RADIUS + OUTER_CIRCLE_WIDTH / 2.0 == 40.0,
+                "the ring's outer edge is the measured 40 CSS px radius (80 across)"
+            )
+        };
+        const {
+            assert!(
+                MIN_WINNER_RADIUS > 50.0 && MIN_WINNER_RADIUS < 65.0,
+                "and the fill settles just clear of it, near 57"
             )
         };
     }

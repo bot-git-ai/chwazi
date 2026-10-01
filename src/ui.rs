@@ -42,6 +42,9 @@ struct App {
     /// `performance.now()` at the first frame, which anchors the pulse so every
     /// circle breathes in step.
     start_time: f64,
+    /// The screen's device pixel ratio, so the draw code reads one number rather
+    /// than asking the window on every frame.
+    scale: f64,
 }
 
 /// The animation-frame closure.
@@ -85,12 +88,19 @@ fn run() -> Result<(), JsValue> {
     let app = Rc::new(RefCell::new(App {
         chooser: Chooser::new(),
         start_time: now(),
+        scale: device_pixel_ratio(),
     }));
 
+    // A window can move between displays -- a phone dragged to a monitor, a tab
+    // dragged between a Retina and a non-Retina screen -- so the ratio is re-read
+    // on every resize, not just at startup.
     listen(&window, "resize", {
         let canvas = canvas.clone();
+        let app = Rc::clone(&app);
         move |_| {
             resize(&canvas);
+            let scale = device_pixel_ratio();
+            borrow(&app, |app| app.scale = scale);
             Ok(())
         }
     })?;
@@ -225,7 +235,8 @@ fn render(
         }
 
         let start_time = app.start_time;
-        paint(&app.chooser, canvas, context, timestamp, start_time);
+        let scale = app.scale;
+        paint(&app.chooser, canvas, context, timestamp, start_time, scale);
         announced
     })
 }
@@ -238,8 +249,16 @@ fn paint(
     context: &web_sys::CanvasRenderingContext2d,
     timestamp: f64,
     start_time: f64,
+    scale: f64,
 ) {
-    let (width, height) = (f64::from(canvas.width()), f64::from(canvas.height()));
+    // Everything below draws in CSS pixels. The canvas is `scale` times that in
+    // device pixels, and this transform is what makes a 40px circle land on 120
+    // pixels of glass instead of being stretched across 40.
+    let _ = context.set_transform(scale, 0.0, 0.0, scale, 0.0, 0.0);
+    let (width, height) = (
+        f64::from(canvas.width()) / scale,
+        f64::from(canvas.height()) / scale,
+    );
     context.clear_rect(0.0, 0.0, width, height);
 
     let pulse = chooser::pulse_scale(timestamp, start_time);
@@ -290,6 +309,12 @@ fn draw_player(
     loading: f64,
 ) {
     let colour = player.color_of();
+    // The ring is drawn at the ring's own centreline, and `OUTER_RADIUS` is the
+    // black gap it leaves between itself and the disc -- not merely a radius. That
+    // gap is the whole of why the mark reads as a disc *inside* a ring rather than
+    // as one flat blob: painted the same colour and touching, the two shapes
+    // disappear into each other. The native app's recordings show it plainly: a
+    // saturated disc, a band of black, then a ring of the same colour outside it.
     let ring_radius = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * pulse;
     let ring_width = chooser::OUTER_CIRCLE_WIDTH * pulse;
 
@@ -311,11 +336,30 @@ fn draw_player(
     context.set_fill_style_str(&colour);
     context.fill();
 
+    // Order matters and is the whole of the mark: disc, then punch the ring's band
+    // out to black, then stroke the ring. Painting the disc last would cover the
+    // ring's inner half and close the gap again, which is what an earlier version
+    // effectively did -- leaving one solid blob in the player's colour.
+    //
+    // `destination-out` is used rather than simply drawing the gap in black, so
+    // that the gap punches through *whatever is underneath*, which matters once
+    // the winner's colour is flooding the screen behind the circle.
+    context.save();
+    let _ = context.set_global_composite_operation("destination-out");
     context.begin_path();
-    let _ = context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI);
-    context.set_line_width(ring_width);
-    context.set_stroke_style_str(&colour);
-    context.stroke();
+    if context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI).is_ok() {
+        context.set_line_width(ring_width);
+        context.set_stroke_style_str("#000000");
+        context.stroke();
+    }
+    context.restore();
+
+    context.begin_path();
+    if context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI).is_ok() {
+        context.set_line_width(ring_width);
+        context.set_stroke_style_str(&colour);
+        context.stroke();
+    }
 
     // The arc spans from `2*PI*(1-loading)/2` to `2*PI*(1-loading)*3/2`: a gap of
     // a quarter turn at the start of the window, closing to nothing by the end,
@@ -392,21 +436,40 @@ fn now() -> f64 {
         .map_or(0.0, |performance| performance.now())
 }
 
-/// Size the canvas to the window, in CSS pixels.
+/// The screen's device pixel ratio, never less than 1.
 ///
-/// Not scaled by `devicePixelRatio`, on purpose: the original sized its canvas
-/// to `innerWidth`/`innerHeight` and drew in the same units, so every radius in
-/// this file is a CSS pixel and the picture is the picture the author shipped. A
-/// high-density screen draws it softer than the browser could, which is a
-/// rewrite's job to keep, not to redesign.
+/// Capped at 3: past that the pixels are finer than the circles, so the extra
+/// cost buys nothing you can see, and it is battery on a phone that is meant to be
+/// handed round a table.
+fn device_pixel_ratio() -> f64 {
+    web_sys::window()
+        .map_or(1.0, |window| window.device_pixel_ratio())
+        .clamp(1.0, 3.0)
+}
+
+/// Size the canvas to the window, and to the screen's pixels.
+///
+/// This is the smoothness. A canvas's drawing surface is its `width`/`height` in
+/// *device* pixels; sizing it in CSS pixels means a 40px circle is rasterised
+/// across 40 backing pixels and then stretched over 120 of them by the
+/// compositor. On any modern phone -- every phone has DPR 2.5 or more -- that is
+/// visible as a jagged, soft-edged mark, and it is not anti-aliasing, it is
+/// resolution.
+///
+/// So the backing store is `css size * devicePixelRatio`, and every frame draws
+/// through a transform of the same ratio. All the arithmetic in this file and in
+/// `chooser.rs` stays in CSS pixels, so every constant and every test is
+/// unchanged; the ratio appears in exactly two places, here and in the one
+/// `set_transform` call in [`paint`].
 fn resize(canvas: &web_sys::HtmlCanvasElement) {
     let Some(window) = web_sys::window() else {
         return;
     };
     let width = window.inner_width().ok().and_then(dimension).unwrap_or(1);
     let height = window.inner_height().ok().and_then(dimension).unwrap_or(1);
-    canvas.set_width(width.max(1));
-    canvas.set_height(height.max(1));
+    let scale = device_pixel_ratio();
+    canvas.set_width((f64::from(width) * scale).round().max(1.0) as u32);
+    canvas.set_height((f64::from(height) * scale).round().max(1.0) as u32);
 }
 
 /// Borrow the app for the length of `body`.

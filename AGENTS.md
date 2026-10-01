@@ -88,8 +88,10 @@ number nobody can correct.
 |---|---|---|
 | `SCALING_PERIOD_MS` | 1000 | pixel area peaks at 1.07s, 2.03s, 3.03s, 4.03s → 0.99s apart |
 | `MAX_PULSE_SCALE` | 0.07 | area varies 1.33:1; area ∝ r², so the radius swings 1.15:1 |
-| `INNER_RADIUS` | 23 | the filled disc is 139 native px across on a 1080px/3x screen |
-| `OUTER_CIRCLE_WIDTH` | 5 | the native ring is a hairline outline, not a 12px band |
+| whole mark | 80 CSS px across | a player circle is 241 native px on a 1080px/3x screen |
+| `INNER_RADIUS` | 25 | the disc inside that 80px mark |
+| `OUTER_RADIUS` | 9 | to the ring's *centreline*; the black gap is `9 - 6` = 3px |
+| `OUTER_CIRCLE_WIDTH` | 12 | the original's, and it was right |
 | `CHOSEN_PLAYER_ANIMATION_TIME_MS` | 180 | the fill is complete 5 frames into 6 at 60fps |
 | `FILL_FRACTION` | 0.5 | same: 5%, 51%, 83%, done — done by the halfway point |
 | `DRAWING_TIME_MS` | 2500 | the original's, kept |
@@ -98,6 +100,22 @@ number nobody can correct.
 The two that changed most are the pulse and the reveal, and both changed for the
 same reason: the original's values are a third to a quarter again as slow as the
 app people actually use.
+
+**The mark is a disc, a black gap, and a ring.** That structure is not cosmetic and
+getting it wrong is invisible in the constants. `OUTER_RADIUS` is the distance from
+the disc's edge to the ring's centreline, so the black band between the two shapes
+is `OUTER_RADIUS - OUTER_CIRCLE_WIDTH / 2` — here 3px. Painted edge to edge in one
+colour the disc and the ring merge, and the mark stops reading as a circle at all.
+An intermediate build did exactly that, and the recording of it showed a plain
+coloured blob: what looked like "too small" was mostly "no structure".
+`tests/shell.rs` pins the draw order and the gap.
+
+**Smoothness is resolution, not anti-aliasing.** The canvas is sized to
+`innerWidth × devicePixelRatio` (capped at 3) and drawn through a transform of the
+same ratio, so a 40px circle is rasterised across 120 device pixels rather than
+40 and stretched by the compositor. Sizing it in CSS pixels -- as this did, and as
+the 2013 original did -- is visible as jagged edges on any modern phone. All the
+arithmetic stays in CSS pixels, so no constant and no test changed with it.
 
 **The reveal is a smoothstep over the first half, then a hold.** Measured 5%, 51%,
 83%, complete across five frames — so the fill is done at the halfway point and

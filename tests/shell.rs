@@ -530,6 +530,64 @@ fn string_literals(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// The circle is drawn as a disc, a black gap, and a ring -- in that order.
+///
+/// This is the one structural property the whole geometry hangs off, and it is
+/// invisible in a constant and obvious on a phone. `OUTER_RADIUS` is the distance
+/// from the disc's edge to the ring's *centreline*, so the black band between them
+/// is `OUTER_RADIUS - OUTER_CIRCLE_WIDTH / 2`. Draw the ring first and the disc
+/// after and the gap closes; the two shapes are the same colour, so the result is
+/// one flat blob and the mark stops reading as a circle at all.
+#[test]
+fn the_ring_is_drawn_outside_the_disc_with_a_gap() {
+    let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
+    let disc = ui.find("chooser::INNER_RADIUS * pulse").expect("a disc");
+    let punch = ui
+        .find("destination-out")
+        .expect("the gap must be punched out, not painted over");
+    let ring = ui
+        .find("set_stroke_style_str(&colour)")
+        .expect("the ring is stroked in the player's colour");
+    assert!(
+        disc < punch && punch < ring,
+        "draw order must be disc ({disc}), then the gap ({punch}), then the ring \
+         ({ring})"
+    );
+    // And the sizes, so a future change of scale cannot quietly close the gap.
+    let chooser = std::fs::read_to_string(root().join("src/chooser.rs")).expect("chooser.rs");
+    let inner: f64 = chooser
+        .lines()
+        .find_map(|line| line.strip_prefix("pub const INNER_RADIUS: f64 = "))
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|n| n.trim().parse().ok())
+        .expect("INNER_RADIUS");
+    let gap: f64 = chooser
+        .lines()
+        .find_map(|line| line.strip_prefix("pub const OUTER_RADIUS: f64 = "))
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|n| n.trim().parse().ok())
+        .expect("OUTER_RADIUS");
+    let width: f64 = chooser
+        .lines()
+        .find_map(|line| line.strip_prefix("pub const OUTER_CIRCLE_WIDTH: f64 = "))
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|n| n.trim().parse().ok())
+        .expect("OUTER_CIRCLE_WIDTH");
+    assert!(
+        gap - width / 2.0 >= 3.0,
+        "the black gap is {}px; below 3px it vanishes on a 3x screen",
+        gap - width / 2.0
+    );
+    // The measured whole mark: 80 CSS px across on a 360px-wide phone.
+    let outer = inner + gap + width / 2.0;
+    assert!(
+        (outer - 40.0).abs() < 1.5,
+        "the finished mark is {}px across; the native app measures 80",
+        outer * 2.0
+    );
+    assert!(inner > 0.0, "and there is a disc to see");
+}
+
 /// The start screen is bare.
 ///
 /// The native app's start screen carries three things this one has no business

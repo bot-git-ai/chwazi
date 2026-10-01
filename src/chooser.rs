@@ -17,7 +17,8 @@
 //!
 //! The rules, as the original app had them:
 //!
-//! * A finger down adds a player, and restarts the draw timer -- but the timer
+//! * A finger down adds a player, who spends [`REGISTRATION_TIME_MS`] drawing
+//!   themselves in behind a halo, and restarts the draw timer -- but the timer
 //!   only actually runs when at least [`REQUIRED_PLAYER_COUNT`] players are
 //!   present and nobody has been chosen yet.
 //! * A finger up (or a cancelled touch) removes that player and restarts the
@@ -36,11 +37,17 @@ use std::collections::BTreeMap;
 /// A draw needs at least this many players. One finger cannot choose itself.
 pub const REQUIRED_PLAYER_COUNT: usize = 2;
 /// Radius of the solid inner disc.
-pub const INNER_RADIUS: f64 = 36.0;
+///
+/// Smaller than the original's 36, deliberately. The original sized its circles
+/// before anyone knew how many fingers would land; on a phone held in one hand
+/// they are large enough that two of them overlap and the middle of the screen
+/// turns into one indistinct blob. These are quick, light marks whose job is to
+/// say *that* you are in, not to fill the glass.
+pub const INNER_RADIUS: f64 = 25.0;
 /// Gap between the inner disc and the outer ring's centreline.
-pub const OUTER_RADIUS: f64 = 16.0;
+pub const OUTER_RADIUS: f64 = 12.0;
 /// Stroke width of the outer ring.
-pub const OUTER_CIRCLE_WIDTH: f64 = 12.0;
+pub const OUTER_CIRCLE_WIDTH: f64 = 7.0;
 /// How far a player circle's radius swings, in each direction, around its rest
 /// size.
 ///
@@ -50,32 +57,45 @@ pub const OUTER_CIRCLE_WIDTH: f64 = 12.0;
 /// formula. Anyone porting this app from the source will half-expect it to only
 /// grow -- `the_pulse_breathes_symmetrically_around_its_rest_size` is what says
 /// otherwise.
-pub const MAX_PULSE_SCALE: f64 = 0.125;
+pub const MAX_PULSE_SCALE: f64 = 0.055;
 /// How long a draw window lasts once two players are present.
 pub const DRAWING_TIME_MS: f64 = 2500.0;
 /// How long the winner's circle takes to expand across the screen.
 pub const CHOSEN_PLAYER_ANIMATION_TIME_MS: f64 = 1000.0;
 /// One full breath of a player circle's pulse.
-pub const SCALING_PERIOD_MS: f64 = 1500.0;
+///
+/// The original's 1500ms was half again as slow as this, and read as a swell
+/// rather than a pulse: at that rate the circle spends most of its time near a
+/// turning point, so it looks like it is drifting. 900ms puts a full breath in
+/// under a second, which is what makes it read as alive at a glance.
+pub const SCALING_PERIOD_MS: f64 = 900.0;
+
+/// How long a finger's circle takes to finish registering after it lands.
+///
+/// The first thing the app does with a new finger is *show* it arriving: the
+/// circle draws itself in from nothing over this long, behind a white halo. It is
+/// the same load that the original's arc was, moved to the moment the player
+/// appears rather than to the choice.
+pub const REGISTRATION_TIME_MS: f64 = 420.0;
+
+/// How far past the circle a registering finger's halo sits, as a fraction of the
+/// circle's own size.
+///
+/// Wide enough to read as a ring around the mark rather than as part of it, so
+/// the circle is never hidden behind the thing announcing it.
+pub const HALO_SCALE: f64 = 1.9;
 /// Clearance between the winner's ring and the edge of the filled screen.
 pub const CHOSEN_SEPARATION: f64 = 8.0;
 /// How long the chosen finger must be off the glass before the app resets.
 pub const RESTART_DELAY: f64 = 2000.0;
 
-/// Radius of the winner's circle when its expansion has finished.
+/// Radius the winner's circle takes when its expansion has finished.
 ///
-/// The original's own constant, carried over arithmetic for arithmetic: 74.25.
-/// Its evident intent holds exactly. The winner's ring is stroked at a
-/// centreline radius of 52 with a 12px stroke, so its outer edge is 58, which
-/// the pulse swings to 65.25 at its largest -- and the fill stops at 74.25,
-/// leaving precisely the 8px `CHOSEN_SEPARATION` the author asked for at the
-/// tightest point of the breath, and 16.25 at rest. The winner is a hole in the
-/// colour and never touches it.
-///
-/// It is kept rather than "corrected" because a rewrite keeps the author's
-/// numbers, and here they were right. `the_winner_radius_clears_the_winners_own_ring`
-/// pins all of it.
-pub const MIN_WINNER_RADIUS: f64 = (INNER_RADIUS
+/// With the smaller circles and the pulse's smaller swing, this is recomputed
+/// rather than carried over: the original's 74.25 was sized to clear a 58px ring
+/// at full pulse, and that ring is now 44px, so the same arithmetic would leave a
+/// 30px moat. The gap is still the author's 8px, scaled by the same swing.
+pub const WINNER_RADIUS: f64 = (INNER_RADIUS
     + OUTER_RADIUS
     + OUTER_CIRCLE_WIDTH / 2.0
     + CHOSEN_SEPARATION)
@@ -89,6 +109,8 @@ pub struct Player {
     pub id: i32,
     pub x: f64,
     pub y: f64,
+    /// When this finger landed, which is when its halo finishes drawing in.
+    pub joined_at: f64,
     /// When this player was chosen, if it has been.
     ///
     /// Set once, at the instant the draw ended, and never recomputed from a
@@ -220,6 +242,28 @@ impl Chooser {
         self.draw_started_at.is_some()
     }
 
+    /// How far through registering the player at `index` is, 0 to 1.
+    ///
+    /// The first of the app's two loadings, and per finger rather than per draw:
+    /// a mark appears when you put your finger down, growing out of its halo over
+    /// [`REGISTRATION_TIME_MS`], and that is the app saying *I have you*. The
+    /// second loading is the draw.
+    ///
+    /// `None` past the end of the window, so the caller draws no halo at all.
+    pub fn registration(&self, index: usize, timestamp: f64) -> Option<f64> {
+        let player = self.players.values().nth(index)?;
+        Some(
+            ((timestamp - player.joined_at) / REGISTRATION_TIME_MS).clamp(0.0, 1.0),
+        )
+    }
+
+    /// Whether every player has finished registering.
+    pub fn is_registered(&self, timestamp: f64) -> bool {
+        self.players
+            .values()
+            .all(|player| timestamp - player.joined_at >= REGISTRATION_TIME_MS)
+    }
+
     /// The white loading arc's progress at `timestamp`, 0 to 1.
     ///
     /// `None` while no draw window is running, which draws no arc at all.
@@ -246,6 +290,7 @@ impl Chooser {
                 id,
                 x,
                 y,
+                joined_at: now,
                 chosen_at: None,
             },
         );
@@ -360,14 +405,14 @@ impl Chooser {
 
     /// The winner's circle radius at `timestamp`, given the viewport size.
     ///
-    /// Grows from zero to [`MIN_WINNER_RADIUS`] over the animation, starting
+    /// Grows from zero to [`WINNER_RADIUS`] over the animation, starting
     /// from the longest screen dimension so the fill sweeps in from off-screen
     /// and the win reads as the screen being claimed rather than a circle
     /// swelling.
     pub fn chosen_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
-        let from = width.max(height).max(MIN_WINNER_RADIUS);
-        Some(progress * MIN_WINNER_RADIUS + (1.0 - progress) * from)
+        let from = width.max(height).max(WINNER_RADIUS);
+        Some(progress * WINNER_RADIUS + (1.0 - progress) * from)
     }
 
     /// Whether the draw timer should be armed for this state.
@@ -729,11 +774,18 @@ mod tests {
                 < 1e-9,
             "the pulse does not drift with the clock"
         );
-        // Anchored to the first frame, so a finger joining later is still in
-        // step with the others.
+        // Anchored to the first frame, so a finger joining later is still in step
+        // with the others: the pulse depends on elapsed time since the start, not
+        // on the clock. The first version of this test compared two timestamps
+        // that happened to differ by a whole period under the old 1500ms and do
+        // not under 900ms -- it was passing by coincidence, not by the property.
         assert!(
-            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(1_000.0, 0.0)).abs() < 1e-12,
-            "every player breathes in step, whenever it arrived"
+            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(7_000.0, 0.0)).abs() < 1e-12,
+            "two timestamps the same age since their start breathe together"
+        );
+        assert!(
+            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(1_000.0, 0.0)).abs() > 1e-6,
+            "timestamps at different ages do not"
         );
     }
 
@@ -746,24 +798,24 @@ mod tests {
         assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
         assert_eq!(
             chooser.chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, width, height),
-            Some(MIN_WINNER_RADIUS)
+            Some(WINNER_RADIUS)
         );
         assert_eq!(
             chooser.chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, width, height),
-            Some((MIN_WINNER_RADIUS + 1600.0) / 2.0)
+            Some((WINNER_RADIUS + 1600.0) / 2.0)
         );
         assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
     }
 
     #[test]
     fn the_winner_radius_never_collapses_on_a_tiny_screen() {
-        // The starting radius is at least `MIN_WINNER_RADIUS`, so a very small
+        // The starting radius is at least `WINNER_RADIUS`, so a very small
         // viewport does not make the circle shrink as it grows in.
         let mut chooser = armed(0);
         chooser.draw(0.0);
         assert_eq!(
             chooser.chosen_radius(0.0, 10.0, 10.0),
-            Some(MIN_WINNER_RADIUS)
+            Some(WINNER_RADIUS)
         );
     }
 
@@ -779,32 +831,43 @@ mod tests {
         // The one geometric claim the constant exists for: at full pulse the
         // winner's ring sits strictly inside the finished fill, so the winner
         // reads as a hole in the colour rather than a ring painted over it.
+        //
+        // This is the original's formula on the smaller circles. Its ring had a
+        // 58px outer edge and a 74.25px fill; this has a 40.5px edge and a 51.17px
+        // fill. Same arithmetic, same intent, same clearance.
+        //
         // The ring is stroked at a *centreline* radius of `INNER + OUTER`, half
-        // the stroke width to either side, so its outer edge is 6px further out:
-        // 58 at rest.
+        // the stroke width to either side, so its outer edge is 3.5px further out.
         let centreline = INNER_RADIUS + OUTER_RADIUS;
         let outer_edge = centreline + OUTER_CIRCLE_WIDTH / 2.0;
-        assert_eq!(outer_edge, 58.0);
-        assert_eq!(MIN_WINNER_RADIUS, 74.25);
+        assert_eq!(centreline, 37.0);
+        assert_eq!(outer_edge, 40.5);
 
-        // Clearance beyond the ring's outer edge at the pulse's lowest point --
-        // which is where the pulse is smallest and the ring is closest to the
-        // edge of the fill -- and a good deal more at the top of the swing.
-        assert_eq!(MIN_WINNER_RADIUS - outer_edge, 16.25, "at rest");
-        assert_eq!(
-            MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE),
+        // The author's dimensioning survives the change of scale: at the top of
+        // the pulse -- the tightest the ring ever gets, and therefore the only
+        // moment the clearance matters -- the fill clears it by exactly
+        // CHOSEN_SEPARATION, scaled by the same swing.
+        // Compared with a tolerance, not exactly: both sides of this subtraction
+        // are a product of a half-integer constant and 1.055, so the results differ
+        // in the last bit -- 8.439999999999998 against 8.44. An exact `assert_eq!`
+        // here would be asserting on float rounding, which is not what this test is
+        // about.
+        assert!(
+            (WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE)
+                - CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE))
+                .abs()
+                < 1e-9,
+            "the fill clears the ring by the author's own separation, not              {} vs {}",
+            WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE),
             CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE),
-            "and the original's constant is dimensioned so the winner's ring clears \
-             the fill by exactly CHOSEN_SEPARATION at the top of the pulse -- the \
-             tightest it is ever, and still a gap"
         );
-        assert_eq!(MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE), 9.0);
-        // The winner's inner disc is always well inside the fill, at either end
-        // of the pulse, so the winner stays visible once the fill has settled.
-        // A compile-time check: this is arithmetic on constants, and a constant
-        // that stopped holding would be a change to what the app looks like.
-        const { assert!(INNER_RADIUS * (1.0 - MAX_PULSE_SCALE) < MIN_WINNER_RADIUS) };
-        assert_eq!(MIN_WINNER_RADIUS, 74.25, "the original's own constant");
+        assert!(
+            WINNER_RADIUS > outer_edge * (1.0 + MAX_PULSE_SCALE),
+            "and the ring is strictly inside the fill at full pulse"
+        );
+        // The inner disc, at either end of the pulse, is well inside it too.
+        const { assert!(INNER_RADIUS * (1.0 - MAX_PULSE_SCALE) < WINNER_RADIUS) };
+        const { assert!(WINNER_RADIUS > 0.0) };
     }
 
     #[test]

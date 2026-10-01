@@ -53,6 +53,9 @@ struct App {
     /// Without this the circle would re-centre on the last finger position
     /// recorded, or vanish mid-reveal.
     last_winner: Option<Winner>,
+    /// The screen's device pixel ratio, so the canvas can be drawn at full
+    /// resolution.
+    scale: f64,
 }
 
 /// A won draw, kept after the finger has gone.
@@ -98,23 +101,33 @@ fn run() -> Result<(), JsValue> {
         .dyn_into::<web_sys::CanvasRenderingContext2d>()?;
 
     // The canvas's drawing surface is its width and height in device pixels, and
-    // assigning either clears it, so this happens before the first frame and
-    // on every resize.
+    // assigning either clears it, so this happens before the first frame and on
+    // every resize.
     resize(&canvas);
+    let scale = device_pixel_ratio();
 
     let app = Rc::new(RefCell::new(App {
         chooser: Chooser::new(),
         start_time: now(),
         last_winner: None,
+        scale,
     }));
-
-    listen(&window, "resize", {
-        let canvas = canvas.clone();
-        move |_| {
-            resize(&canvas);
-            Ok(())
-        }
-    })?;
+    {
+        let app = Rc::clone(&app);
+        // A window can move between displays -- a phone dragged to a monitor, a
+        // browser tab dragged between a Retina and a non-Retina screen. The scale
+        // is part of the app's state so that the draw code reads one value rather
+        // than reaching for the window every frame.
+        listen(&window, "resize", {
+            let canvas = canvas.clone();
+            move |_| {
+                resize(&canvas);
+                let scale = device_pixel_ratio();
+                borrow(&app, |app| app.scale = scale);
+                Ok(())
+            }
+        })?;
+    }
 
     // Pointer events, which on a touch screen *are* the fingers. A mouse sends
     // the same events, so the chooser is usable on a desktop too.
@@ -170,24 +183,10 @@ fn run() -> Result<(), JsValue> {
     })?;
 
     register_service_worker();
-    // Rust has started and has a canvas to draw into, so the splash has done its
-    // job. Removed here rather than left to fade, because a fade would leave it
-    // over the canvas swallowing touches for as long as it ran -- and the whole
-    // app is people slapping a phone.
-    drop_splash();
-    status("Put two or more fingers on the screen.");
+    // Nothing between the first frame and the canvas: no splash to take down, no
+    // prompt to show. The app opens straight into being the thing you touch.
     start_loop(Rc::clone(&app), canvas, context);
     Ok(())
-}
-
-/// Take the splash off the screen.
-///
-/// The shell also schedules a fallback for the case where the app never starts at
-/// all; this is the normal path, and it happens before the first frame.
-fn drop_splash() {
-    if let Ok(splash) = element::<web_sys::HtmlElement>("splash") {
-        splash.remove()
-    }
 }
 
 /// Start the one animation-frame loop that draws everything.
@@ -287,6 +286,7 @@ fn render(
         paint(
             &app.chooser,
             last_winner,
+            app.scale,
             canvas,
             context,
             timestamp,
@@ -310,12 +310,20 @@ fn render(
 fn paint(
     app: &Chooser,
     last_winner: Option<Winner>,
+    scale: f64,
     canvas: &web_sys::HtmlCanvasElement,
     context: &web_sys::CanvasRenderingContext2d,
     timestamp: f64,
     start_time: f64,
 ) {
-    let (width, height) = (f64::from(canvas.width()), f64::from(canvas.height()));
+    // Everything below draws in CSS pixels. The canvas is `scale` times that in
+    // device pixels, so the transform is what makes a circle 51 CSS pixels across
+    // land on 51 * device pixels of glass instead of being stretched over 51.
+    let _ = context.set_transform(scale, 0.0, 0.0, scale, 0.0, 0.0);
+    let (width, height) = (
+        f64::from(canvas.width()) / scale,
+        f64::from(canvas.height()) / scale,
+    );
     context.clear_rect(0.0, 0.0, width, height);
 
     let pulse = chooser::pulse_scale(timestamp, start_time);
@@ -339,17 +347,20 @@ fn paint(
 
     let players: Vec<(i32, f64, f64)> = app.players().map(|p| (p.id, p.x, p.y)).collect();
 
-    // Fewer than two fingers: there is nothing to choose between, so say what
-    // the app wants rather than showing an empty screen.
+    // Drawing. With fewer than two fingers there is no wheel to show, but the
+    // circles still register: a player putting their finger down sees it arrive,
+    // which is the whole of the app's feedback before there is a choice to make.
     if players.len() < chooser::REQUIRED_PLAYER_COUNT {
-        draw_hint(context, players.len(), width, height, pulse);
-        for (id, x, y) in &players {
+        for (index, (id, x, y)) in players.iter().enumerate() {
+            let halo = app.registration(index, timestamp).unwrap_or(1.0);
             let here = Player {
                 id: *id,
                 x: *x,
                 y: *y,
+                joined_at: f64::NEG_INFINITY,
                 chosen_at: None,
             };
+            draw_halo(context, &here, halo);
             draw_player(context, &here, pulse, 0.0);
         }
         return;
@@ -372,13 +383,16 @@ fn paint(
 
     for (index, (id, _, _)) in players.iter().enumerate() {
         let slot = slots[index];
+        let halo = app.registration(index, timestamp).unwrap_or(1.0);
         let landing = app.pending_winner() == Some(index);
         let here = Player {
             id: *id,
             x: slot.x,
             y: slot.y,
+            joined_at: f64::NEG_INFINITY,
             chosen_at: None,
         };
+        draw_halo(context, &here, halo);
         draw_player(
             context,
             &here,
@@ -412,8 +426,8 @@ fn draw_reveal(
         .unwrap_or(1.0);
     // The same radius curve as the original: from off-screen down to just
     // clearing the winner's own ring.
-    let from = width.max(height).max(chooser::MIN_WINNER_RADIUS);
-    let radius = progress * chooser::MIN_WINNER_RADIUS + (1.0 - progress) * from;
+    let from = width.max(height).max(chooser::WINNER_RADIUS);
+    let radius = progress * chooser::WINNER_RADIUS + (1.0 - progress) * from;
 
     match web_sys::Path2d::new() {
         Ok(path) => {
@@ -427,7 +441,13 @@ fn draw_reveal(
     }
     // The winner alone, at full pulse, and never a loading arc: the draw is over,
     // and an arc sweeping its ring would read as a second, still-running draw.
-    let here = Player { id: winner.id, x: winner.x, y: winner.y, chosen_at: None };
+    let here = Player {
+        id: winner.id,
+        x: winner.x,
+        y: winner.y,
+        joined_at: f64::NEG_INFINITY,
+        chosen_at: None,
+    };
     draw_player(
         context,
         &here,
@@ -518,50 +538,36 @@ fn draw_pointer(
     context.stroke()
 }
 
-/// The prompt, when there is nothing to choose between yet.
+/// The registration halo: the app's first loading, and the only feedback a player
+/// gets before there is a choice.
 ///
-/// One finger gets a different prompt from none: "one more" is more use to
-/// someone mid-gesture than the general instruction, and it is the only time the
-/// app knows how close it is to being ready.
-fn draw_hint(
-    context: &web_sys::CanvasRenderingContext2d,
-    players: usize,
-    width: f64,
-    height: f64,
-    pulse: f64,
-) {
-    let (text, size) = if players == 0 {
-        ("Put two or more fingers on the screen", 0.042)
-    } else {
-        ("One more finger", 0.052)
-    };
-    let font_px = (width.min(height) * size).round().max(16.0);
-    context.save();
-    context.set_font(&format!(
-        "500 {font_px}px system-ui, -apple-system, 'Segoe UI', sans-serif"
-    ));
-    context.set_text_align("center");
-    context.set_text_baseline("middle");
+/// A white ring collapses onto a newly-landed circle and vanishes, so putting a
+/// finger down is an event rather than something that merely happens to be there.
+/// It fades as it closes rather than shrinking all the way, which keeps the last
+/// few frames from a thin bright line flickering at the circle's edge.
+///
+/// `progress` is [`chooser::registration`]: 0 as the finger lands, 1 when the
+/// circle has arrived. Past 1 nothing is drawn at all, so a circle that has
+/// settled costs nothing per frame.
+fn draw_halo(context: &web_sys::CanvasRenderingContext2d, player: &Player, progress: f64) {
+    if progress >= 1.0 {
+        return;
+    }
+    let start = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * chooser::HALO_SCALE;
+    let end = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * 1.35;
+    let eased = 1.0 - (1.0 - progress).powi(2);
+    let radius = end + (start - end) * eased;
+    // Full strength at the start, gone by the end: the halo announces the arrival
+    // and gets out of the way.
+    let alpha = 0.85 * (1.0 - progress);
 
-    let cx = width / 2.0;
-    let cy = height / 2.0;
-    // A slow breath on the prompt as well, so the empty screen is not dead: the
-    // same 1500ms as the circles, so the whole screen breathes as one thing.
-    let breathe = 1.0 + 0.04 * (pulse - 1.0) / chooser::MAX_PULSE_SCALE;
-    let _ = context.translate(cx, cy);
-    let _ = context.scale(breathe, breathe);
-    context.set_global_alpha(0.55);
-
-    // Outlined, then filled. A single line of text on a black screen has nothing
-    // behind it, and a circle can end up under the words when two fingers land
-    // close together; a few pixels of the page's own black keeps it readable
-    // without a box, which would be far too heavy on an empty screen.
-    context.set_line_width(5.0);
-    context.set_stroke_style_str("rgba(0, 0, 0, 0.85)");
-    let _ = context.stroke_text(text, 0.0, 0.0);
-    context.set_fill_style_str("#ffffff");
-    let _ = context.fill_text(text, 0.0, 0.0);
-    context.restore();
+    context.begin_path();
+    if context.arc(player.x, player.y, radius, 0.0, TWO_PI).is_err() {
+        return;
+    }
+    context.set_line_width(2.5);
+    context.set_stroke_style_str(&format!("rgba(255, 255, 255, {alpha:.3})"));
+    context.stroke();
 }
 
 /// One player: a filled inner disc, a ring around it, and the white arc that
@@ -675,21 +681,39 @@ fn now() -> f64 {
         .map_or(0.0, |performance| performance.now())
 }
 
-/// Size the canvas to the window, in CSS pixels.
+/// The screen's device pixel ratio, never less than 1.
 ///
-/// Not scaled by `devicePixelRatio`, on purpose: the original sized its canvas
-/// to `innerWidth`/`innerHeight` and drew in the same units, so every radius in
-/// this file is a CSS pixel and the picture is the picture the author shipped. A
-/// high-density screen draws it softer than the browser could, which is a
-/// rewrite's job to keep, not to redesign.
+/// Capped at 3: a 4x ratio would quadruple the pixels for no visible gain on a
+/// screen whose pixels are already smaller than the circles, and costs battery on
+/// a phone that is meant to be handed round.
+fn device_pixel_ratio() -> f64 {
+    web_sys::window()
+        .map_or(1.0, |window| window.device_pixel_ratio())
+        .clamp(1.0, 3.0)
+}
+
+/// Size the canvas to the window, and to the screen's pixels.
+///
+/// The canvas's drawing surface is its `width`/`height` in *device* pixels. The
+/// original set those to `innerWidth`/`innerHeight` and drew in CSS pixels, so on
+/// any high-density screen -- every modern phone -- a 51px circle was being drawn
+/// across about 51 physical pixels and upscaled by the compositor. That is the
+/// single biggest reason the edges looked soft: not anti-aliasing, resolution.
+///
+/// So the backing store is now `css size * devicePixelRatio`, and everything is
+/// drawn through a transform of the same ratio, which keeps all the arithmetic in
+/// this file in CSS pixels. A CSS pixel is still a CSS pixel in every constant and
+/// every test; the device ratio only ever appears here and in the one
+/// `set_transform` call.
 fn resize(canvas: &web_sys::HtmlCanvasElement) {
     let Some(window) = web_sys::window() else {
         return;
     };
     let width = window.inner_width().ok().and_then(dimension).unwrap_or(1);
     let height = window.inner_height().ok().and_then(dimension).unwrap_or(1);
-    canvas.set_width(width.max(1));
-    canvas.set_height(height.max(1));
+    let scale = device_pixel_ratio();
+    canvas.set_width((f64::from(width) * scale).round().max(1.0) as u32);
+    canvas.set_height((f64::from(height) * scale).round().max(1.0) as u32);
 }
 
 /// Borrow the app for the length of `body`.
@@ -849,11 +873,18 @@ fn script_belongs_to_app(script: &str, ours: &str) -> bool {
 }
 
 /// Say how many fingers are down, for anyone who cannot see the canvas.
+///
+/// This is a screen-reader live region and nothing else -- it is clipped off the
+/// screen for sighted players, so the "one more" prompt this used to carry is
+/// gone from the app entirely. The count itself is the useful part: it is how a
+/// non-sighted player knows whether they are alone on the glass.
 fn announce_players(count: usize) {
     let text = if count >= chooser::REQUIRED_PLAYER_COUNT {
         format!("{count} fingers down. Choosing in a moment.")
+    } else if count == 1 {
+        "1 finger down.".to_string()
     } else {
-        format!("{count} finger down. Put two or more fingers on the screen.")
+        "No fingers down.".to_string()
     };
     status(&text);
 }

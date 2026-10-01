@@ -88,23 +88,35 @@ These are the original's, unchanged, and they are the reason the app feels the
 way it does. They are listed here because a rewrite is exactly when they quietly
 get "improved", and on this app every one of them is the feel:
 
-| | |
-|---|---|
-| `SCALING_PERIOD_MS` = 1500 | one breath of the pulse, per the original |
+| | | |
+|---|---|---|
+| `SCALING_PERIOD_MS` = 900 | one breath of the pulse |
+| `REGISTRATION_TIME_MS` = 420 | a new circle drawing itself in behind its halo |
 | `DRAWING_TIME_MS` = 2500 | the whole window: spin, then a beat to read it |
+| `wheel::SPIN_FRACTION` = 0.55 | of that window, the spin; the rest is the result |
+| `wheel::GATHER_FRACTION` = 0.34 | of the spin, the circles reaching their slots |
 | `CHOSEN_PLAYER_ANIMATION_TIME_MS` = 1000 | the winner's colour flooding the screen |
 | `RESTART_DELAY` = 2000 | after the winner lifts, before the next draw |
 
-These are still the original's numbers, and that is deliberate. What the native
-app has and the web app never did is something *inside* the 2500ms: the window
-used to be a wait, with a white arc closing on each finger and nothing else to
-watch. It is now a spin. The timing did not change so that the window would feel
-shorter -- it did not need to; a window with something in it feels shorter than
-an empty one of the same length.
+**These are no longer the original's numbers, deliberately.** The original's
+window and its reset are kept, because they are the game's pacing. Everything
+*inside* the window was measured against how it felt, and three of those were
+wrong:
 
-The spin stops at `wheel::SPIN_FRACTION` = 0.8, so the last 500ms is a landed,
-readable wheel before the colour floods the screen. A result that is announced by
-the animation that produces it cannot be followed.
+- The pulse was 1500ms and read as a swell rather than a pulse, because at that
+  rate a circle spends most of its time near a turning point. 900ms puts a full
+  breath in under a second.
+- The circles were 58px across and two of them overlapped into one blob on a phone
+  held in one hand. They are 40.5px now, with the swing reduced from ±12.5% to
+  ±5.5% — smaller *and* livelier, which is the opposite of the usual trade.
+- The spin overran into the reveal and the circles crawled most of the way before
+  snapping together. The spin now takes just over half the window and the circles
+  reach their slots in the first third of it, leaving ~900ms of a landed result.
+
+`WINNER_RADIUS` is recomputed from the same formula on the smaller circles rather
+than carried over: the original's 74.25 was sized to clear a 58px ring, and that
+ring is 40.5px now. The clearance is still the author's 8px, scaled by the same
+swing, and a test pins it.
 
 A circle appears on the frame after `pointerdown` — the same frame the original
 drew it on, because the original also mutated its map in the event handler and
@@ -175,7 +187,10 @@ strays, no unsubstituted `__VERSION__`, bindings that export.
 ## Code map
 
 - `wheel.rs`: the spinning selection animation, no DOM and no canvas. Where the
-  wheel sits, how fast the pointer turns, and which player it stops on. It needs
+  wheel sits, how fast the pointer turns, and which player it stops on. The
+  pointer rides `POINTER_OFFSET` *outside* the ring of circles, so it stops beside
+  the winner rather than on it: landing on the circle hides the very thing it is
+  pointing at behind a white dot and a ring of the same colour. It needs
   no state: given the same players and the same millisecond it draws the same
   wheel, which is what lets it stay in step with fingers moving underneath it.
   The circle-to-wheel move is eased, not linear, so the circles arrive rather than
@@ -229,12 +244,26 @@ circle, and it is only true if the circle is not the input.
 
 ## Two things that are not about speed
 
-- **The splash is removed, not faded.** The app is people slapping a phone, and
-  that is the moment it starts. A splash still on screen over the canvas swallows
-  the first tap of every round, so Rust removes it before the first frame.
-- **The hint is drawn only when there are fewer than two fingers.** One finger
-  gets "One more finger" rather than the general instruction, because it is the
-  only moment the app knows how close it is to being ready.
+## What is not on screen
+
+Nothing. The canvas is the whole interface, and that is a decision rather than an
+oversight:
+
+- **No splash, and no floating icon.** There was one, and it was removed: a logo
+  over black in front of an app whose input is people slapping a phone.
+- **No prompt when the glass is empty.** "Put two or more fingers on the screen"
+  and its "One more finger" variant both existed and both are gone. An instruction
+  across the middle of the screen is in the way of the thing the player is looking
+  at, and the app is meant to be understood by putting a finger down.
+
+What replaced both is a *load* rather than a message: a new finger's circle now
+draws itself in behind a collapsing white halo over `REGISTRATION_TIME_MS`. That is
+the app's first loading — per finger, at the moment of arrival, and it is how the
+app says *I have you* — and it needed no text to do it. The second loading is the
+choice: the halo is the first, the draw is the second.
+
+The one line of guidance that remains is the meta description, which the player
+sees in the launcher or a share sheet and never while the app is open.
 
 ## One deliberate difference
 
@@ -259,6 +288,11 @@ one JS function per frame.
 - The winner buzzes the phone (`navigator.vibrate`, 40ms) once, on the frame the
   winner is announced. Browsers may ignore it, and iOS Safari always does; it is
   additive and nothing depends on it.
+- The canvas is drawn at `devicePixelRatio`, capped at 3. The original sized its
+  backing store in CSS pixels, so on any modern phone every circle was being drawn
+  across a third of the pixels it occupied and upscaled by the compositor — which
+  is why the edges looked soft. All arithmetic here is still in CSS pixels; the
+  ratio appears only in `resize` and in one `set_transform`.
 - A pointer event is handled before the frame that draws it, and the only work
   in that handler is the state change itself. The screen-reader announcement is
   written from the render loop rather than from the handler, so nothing but the

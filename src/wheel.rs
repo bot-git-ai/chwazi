@@ -21,17 +21,19 @@
 /// How long the wheel takes to spin and settle, as a fraction of the draw
 /// window.
 ///
-/// The last fifth of the window is not spin: the pointer has landed and the
-/// result is readable before the colour floods the screen, so the decision is
-/// never hidden by the animation that announces it.
-pub const SPIN_FRACTION: f64 = 0.8;
+/// Just over half, so the spin and the circle-in are both quick and roughly 900ms
+/// of the window is left over as a landed, readable result before the colour
+/// floods the screen. That tail is the point: a result that is announced by the
+/// animation producing it cannot be followed, and 900ms is long enough to say
+/// "that one" out loud.
+pub const SPIN_FRACTION: f64 = 0.55;
 
 /// How many turns the pointer makes before it stops.
 ///
-/// Two and a bit: enough that it reads as a spin and lands between players at a
-/// glance, few enough that the whole thing fits inside the window without the
-/// last turn crawling.
-pub const SPIN_TURNS: f64 = 2.6;
+/// Just over two, and now inside a shorter time, so it reads as a flick rather
+/// than a carousel. Enough to be unmistakably random, few enough that the last
+/// turn lands instead of crawling.
+pub const SPIN_TURNS: f64 = 2.15;
 
 /// Radius the wheel's player circles sit at, as a fraction of the window's
 /// shorter side.
@@ -41,6 +43,21 @@ pub const SPIN_TURNS: f64 = 2.6;
 /// grows with the screen but stops well short of filling it, and the result is
 /// that the same circle is the same size on every device.
 pub const WHEEL_RADIUS_FRACTION: f64 = 0.3;
+
+/// How far outside the ring of circles the pointer rides.
+///
+/// The pointer stops *beside* the winner rather than on top of it. Landing on the
+/// circle hides the very thing it is pointing at behind a white dot and a ring of
+/// the same colour, and reads as "a dot stopped somewhere" instead of "that one".
+/// A gap of this size keeps both readable at once.
+pub const POINTER_OFFSET: f64 = 30.0;
+
+/// How much of the spin the circles take to gather onto the wheel, as a fraction
+/// of it.
+///
+/// Short on purpose: the circles reach their slots while the pointer is still
+/// travelling, so by the time it starts slowing they are already waiting for it.
+pub const GATHER_FRACTION: f64 = 0.34;
 
 /// Ceiling on the wheel's radius, in the same units as the circles.
 ///
@@ -139,10 +156,15 @@ pub fn slots(players: &[(i32, f64, f64)], progress: f64, width: f64, height: f64
             let (sx, sy) = (cx + radius * slot.cos(), cy + radius * slot.sin());
             // The finger's own position, pulled most of the way to the slot: not
             // all the way, so the circle still visibly belongs to the finger that
-            // owns it while it settles. `lerp` is deliberately not smoothstepped
-            // -- the finger's own drift should stay exactly as responsive as it
-            // is outside the wheel.
-            let ease = 1.0 - (1.0 - progress).powi(3);
+            // owns it while it settles.
+            //
+            // The gather is over quickly -- the last third of the window -- and is
+            // eased in on its own rather than riding the pointer's deceleration.
+            // Sharing the pointer's curve made the circles crawl for most of the
+            // spin and only snap together at the very end, which is the opposite
+            // of the flick it should be.
+            let gather = (progress / GATHER_FRACTION).clamp(0.0, 1.0);
+            let ease = 1.0 - (1.0 - gather).powi(3);
             Slot {
                 x: x + (sx - x) * ease,
                 y: y + (sy - y) * ease,
@@ -171,10 +193,10 @@ pub fn spin_progress(elapsed: f64, window: f64) -> f64 {
 
 /// Where the pointer is, in screen radians, at `elapsed`.
 ///
-/// It sits one step *behind* the player it will stop on, so the pointer arrives
-/// at the top of the wheel at the same moment that player does. A pointer
-/// sweeping in step with the slots would be pointing at a different player from
-/// the one landing.
+/// It sits one step *behind* the player it will stop on, so the pointer arrives at
+/// the top of the wheel at the same moment that player does. A pointer sweeping in
+/// step with the slots would be pointing at a different player from the one
+/// landing.
 ///
 /// The angle is held once the spin has stopped, rather than continuing to
 /// advance with elapsed time. Letting it keep going past the stop is not merely
@@ -188,11 +210,14 @@ pub fn pointer_angle(elapsed: f64, window: f64) -> f64 {
 }
 
 /// The pointer's position at `elapsed`.
+///
+/// [`POINTER_OFFSET`] further out than the circles, so it stops beside the winner
+/// rather than over it.
 pub fn pointer_position(elapsed: f64, window: f64, width: f64, height: f64) -> (f64, f64) {
     let (cx, cy) = centre(width, height);
-    let radius = radius(width, height);
+    let ring = radius(width, height) + POINTER_OFFSET;
     let angle = pointer_angle(elapsed, window);
-    (cx + radius * angle.cos(), cy + radius * angle.sin())
+    (cx + ring * angle.cos(), cy + ring * angle.sin())
 }
 
 /// Which player the pointer has landed on, given the slots.
@@ -435,19 +460,91 @@ mod tests {
     }
 
     #[test]
-    fn the_spin_finishes_before_the_reveal_starts() {
-        // The last fifth of the window is left empty so the result is readable
-        // before the colour floods the screen.
-        assert_eq!(SPIN_FRACTION, 0.8);
+    fn the_spin_finishes_well_before_the_reveal_starts() {
+        // Just over half the window is spin, so roughly 900ms is a landed,
+        // readable result before the colour floods the screen.
         let stopped_at = SPIN_FRACTION * 2500.0;
+        assert!(stopped_at < 1500.0, "the spin is over by {stopped_at}ms");
         assert_eq!(spin_progress(stopped_at, 2500.0), 1.0);
         assert_eq!(
             spin_progress(stopped_at + 1.0, 2500.0),
             1.0,
             "and it stays stopped after that"
         );
-        // So there is a real beat: 500ms of a landed, readable wheel.
-        assert!(2500.0 - stopped_at >= 400.0, "a beat long enough to read");
+        let readable = 2500.0 - stopped_at;
+        assert!(readable >= 800.0, "a beat long enough to read: {readable}ms");
+    }
+
+    #[test]
+    fn the_spin_is_over_in_under_a_second_and_a_half() {
+        // The original's window is 2500ms and the spin now uses just over half of
+        // it. Slow enough to follow, fast enough to feel decided.
+        const {
+            assert!(
+                SPIN_FRACTION * 2500.0 <= 1500.0,
+                "the spin itself should be under 1.5s"
+            )
+        };
+    }
+
+    #[test]
+    fn the_circles_gather_while_the_pointer_is_still_travelling() {
+        // The gather is over well before the spin stops, so the circles are
+        // already waiting when the pointer starts slowing. Riding the pointer's
+        // own curve made them crawl and then snap together, which is the opposite
+        // of a flick.
+        let gather_done = GATHER_FRACTION;
+        assert!(
+            gather_done < SPIN_FRACTION * 0.7,
+            "gather {gather_done} vs spin {SPIN_FRACTION}"
+        );
+        // Concretely: by 40% of the spin the circles are essentially home.
+        let s = slots(&five(), 0.4, W, H);
+        let (_, cy) = centre(W, H);
+        let r = radius(W, H);
+        for (slot, &(_, fx, fy)) in s.iter().zip(&five()) {
+            let target_r = ((slot.x - W / 2.0).powi(2) + (slot.y - cy).powi(2)).sqrt();
+            let travelled = (slot.x - fx).hypot(slot.y - fy);
+            assert!(
+                travelled >= 0.9 * target_r.min(travelled + target_r),
+                "a circle has not made most of its journey at 40% of the spin"
+            );
+            assert!((target_r - r).abs() < 1e-9, "and is on the ring");
+        }
+    }
+
+    #[test]
+    fn the_pointer_stops_beside_the_winner_not_on_it() {
+        // Landing on the circle hides the thing it points at behind a white dot
+        // and a ring of the same colour. It has to sit outside the ring.
+        let s = slots(&five(), 1.0, W, H);
+        let (px, py) = pointer_position(2500.0, 2500.0, W, H);
+        let (_, cy) = centre(W, H);
+        let distance_from_centre = ((px - W / 2.0).powi(2) + (py - cy).powi(2)).sqrt();
+        let ring = radius(W, H);
+        assert!(
+            distance_from_centre > ring,
+            "the pointer at {distance_from_centre} is inside the ring at {ring}"
+        );
+        // By exactly the offset, and no more.
+        assert!((distance_from_centre - (ring + POINTER_OFFSET)).abs() < 1e-9);
+        // And it is clear of the circle it points at: outside its outer edge.
+        assert!(
+            (px - s[0].x).hypot(py - s[0].y) >= POINTER_OFFSET - 1e-9,
+            "the pointer is inside the circle's own edge"
+        );
+    }
+
+    #[test]
+    fn the_pointer_is_beside_the_circle_for_the_whole_spin() {
+        let (cx, cy) = centre(W, H);
+        let outside = radius(W, H) + POINTER_OFFSET - 1e-9;
+        for step in 0..=60 {
+            let elapsed = f64::from(step) * 2500.0 / 60.0;
+            let (x, y) = pointer_position(elapsed, 2500.0, W, H);
+            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            assert!(d >= outside, "the pointer dipped inside the ring at {elapsed}ms");
+        }
     }
 
     #[test]
@@ -546,15 +643,27 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_is_exactly_on_the_landing_player_at_the_stop() {
-        // The visual end state: the pointer is resting on the circle that won,
-        // not hovering near it.
+    fn the_pointer_points_at_exactly_the_landing_player() {
+        // The end state. The pointer is offset *radially* from the winner, so it
+        // shares its angle exactly -- which is what "pointing at" means, and is
+        // what `landed_on` reports. Its position deliberately does not coincide
+        // with the circle's; `the_pointer_stops_beside_the_winner_not_on_it` is
+        // what pins the gap. The first version of this test asserted both, and the
+        // second half is precisely the behaviour that was changed.
         let s = slots(&five(), 1.0, W, H);
         let angle = pointer_angle(2500.0, 2500.0);
         let landed = landed_on(&s, 2500.0, 2500.0).expect("a landing");
+
+        // Same ray from the centre, so the pointer and the winner are aligned.
         assert!(angle_distance(s[landed].angle, angle) < 1e-9);
+
+        // And the gap between them is exactly the offset, not more.
         let (px, py) = pointer_position(2500.0, 2500.0, W, H);
-        assert!((px - s[landed].x).abs() < 1e-9 && (py - s[landed].y).abs() < 1e-9);
+        let gap = (px - s[landed].x).hypot(py - s[landed].y);
+        assert!(
+            (gap - POINTER_OFFSET).abs() < 1e-9,
+            "the pointer is {gap} from the winner, not {POINTER_OFFSET}"
+        );
     }
 
     #[test]
@@ -565,14 +674,17 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_is_on_the_wheel_ring_like_every_circle() {
+    fn the_pointer_holds_a_constant_offset_from_the_ring() {
+        // It rides a circle of its own, so its distance from the centre never
+        // changes -- which is what keeps the gap to the circles even the whole way
+        // round rather than bunching up on one side.
         let (cx, cy) = centre(W, H);
-        let r = radius(W, H);
+        let want = radius(W, H) + POINTER_OFFSET;
         for step in 0..=50 {
             let elapsed = f64::from(step) * 50.0;
             let (x, y) = pointer_position(elapsed, 2500.0, W, H);
             let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-            assert!((d - r).abs() < 1e-9, "the pointer left the ring at {elapsed}ms");
+            assert!((d - want).abs() < 1e-9, "the pointer's orbit changed at {elapsed}ms");
         }
     }
 

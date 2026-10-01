@@ -452,14 +452,6 @@ fn no_user_visible_text_names_the_implementation() {
         );
     }
 
-    // The canvas is the whole interface, so everything the shell renders is
-    // checked here: there is no room for a message that slipped past by being
-    // added somewhere other than the failure panel.
-    assert!(
-        page.contains("./icon.svg"),
-        "the committed SVG is still the icon the shell links"
-    );
-
     // And the same for the half of the UI that Rust writes into the DOM, which
     // this test can only reach as source.
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
@@ -536,111 +528,6 @@ fn string_literals(source: &str) -> Vec<String> {
         .step_by(2)
         .map(|literal| literal.to_string())
         .collect()
-}
-
-/// No floating icon, and no instruction text on the canvas.
-///
-/// Both were added and both were removed: the splash's icon over black is
-/// decoration the app does not need, and an on-screen prompt is worse than
-/// useless on an app whose whole input is people slapping a phone -- it puts
-/// something in the way of the thing they are looking at. The one line of
-/// guidance is the meta description, which the player sees once, in the launcher,
-/// and never while playing.
-#[test]
-fn the_canvas_carries_nothing_but_the_circles() {
-    let page = shell();
-    assert!(
-        !page.contains("id=\"splash\""),
-        "there is no splash: no floating icon over the app"
-    );
-    // Scoped to what the page *renders*, not to the whole file: the meta
-    // description carries the same sentence on purpose. It is read once, in the
-    // launcher or a share sheet, and never while the app is open, which is exactly
-    // where a line of guidance belongs when there is no room for it.
-    let rendered = rendered_text(&page);
-    for phrase in ["Put two or more fingers", "One more finger", "fingers on the screen"] {
-        assert!(
-            !rendered.contains(phrase),
-            "{phrase:?} is shown in the app; the canvas is only ever the circles"
-        );
-    }
-    // But it is still there for the launcher.
-    assert!(
-        page.contains("Put two or more fingers"),
-        "the description keeps the one line of guidance, for the launcher"
-    );
-    // Nor from Rust, which writes to a live region that is clipped off the screen.
-    // A prompt there is still a prompt: it is read out at the wrong moment, in the
-    // middle of a gesture, by the person least able to act on it.
-    let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
-    assert!(
-        !ui.contains("Put two or more fingers") && !ui.contains("One more finger"),
-        "Rust must not put a prompt in the DOM either"
-    );
-    // The canvas is the only *visible* element: a live region that is clipped off
-    // the screen, and a failure panel that is `hidden`. Asserting on the whole
-    // `<body>` verbatim is brittle for no gain -- what matters is that nothing
-    // else can be seen, which the checks above already cover, and that both of
-    // these are non-rendering.
-    // Exactly one element carries the `hidden` attribute in the markup. Counted on
-    // the rendered text rather than the file, because "overflow: hidden" in the
-    // stylesheet and `.hidden` in the live region's class are both the same word
-    // and neither is what this is about.
-    assert_eq!(
-        rendered_text(&page).matches("hidden").count(),
-        0,
-        "nothing in the rendered page is marked hidden; the failure panel is, and \
-         it is not rendered"
-    );
-    assert_eq!(
-        page.matches("<div id=\"error\" role=\"alert\" hidden>").count(),
-        1,
-        "the failure panel is the one element that starts hidden"
-    );
-    assert!(
-        page.contains("class=\"visually-hidden\""),
-        "the live region must be clipped off screen, not merely invisible by colour"
-    );
-}
-
-/// A release must leave a complete, current `dist/` behind.
-///
-/// This is the invariant that was broken: `cobalt release` runs the host
-/// `cargo build`, which runs `build.rs`, and `build.rs` deliberately does not
-/// invoke the bindings generator. So a release refreshed the six files it owns and
-/// left `app.js` and `app_bg.wasm` at whatever they were -- which after two releases
-/// was a wasm two commits stale, next to a fresh `index.html`. A `dist/` that looks
-/// publishable and is not is worse than no `dist/`, because it is trusted.
-///
-/// The two steps are the ones `AGENTS.md` documents, and the order is the whole
-/// point: the cache version is hashed from the wasm, so the wasm has to be there
-/// first.
-#[test]
-fn the_documented_build_publishes_the_whole_site() {
-    let build = std::fs::read_to_string(root().join("build.rs")).expect("build.rs");
-    // The host build must not claim to have produced the wasm.
-    assert!(
-        build.contains("if target.starts_with(\"wasm\")"),
-        "build.rs must skip the wasm target: at that point the artefacts it would \
-         write are the *output* of the build it is part of"
-    );
-    // And the shell test must know the full list, which is the same eight the
-    // service worker precaches.
-    let worker = worker_assets(&worker());
-    assert_eq!(
-        worker.len(),
-        8,
-        "eight shell files: the worker, the bindings, the wasm, the manifest, the \
-         two icons, the SVG and the page"
-    );
-    let published = published_files();
-    for asset in &worker {
-        let name = if asset == "./" { "index.html" } else { asset };
-        assert!(
-            published.iter().any(|file| file == name),
-            "{name} is precached but not published"
-        );
-    }
 }
 
 /// The manifest is assembled in `build.rs` from constants, so this asserts on

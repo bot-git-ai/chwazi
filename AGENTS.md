@@ -1,13 +1,9 @@
 # chwazi
 
 Chwazi Finger Chooser: a multi-touch finger chooser for a phone passed around a
-table. Every finger on the glass becomes a coloured circle; once two or more are
-down they gather into a wheel, the wheel spins, and the pointer settles on one of
-them, whose colour then takes the screen. All application logic, state and
-rendering are Rust.
-
-One job, one way: several fingers in, exactly one finger chosen out. No modes, no
-team splitting, no multiple winners. `cargo build` generates the
+table. Every finger on the glass becomes a coloured circle; after 2500ms of
+stillness one of them is chosen at random and its colour takes the screen. All
+application logic, state and rendering are Rust. `cargo build` generates the
 **static PWA** into `./dist` — a front-end-only site any file host can serve,
 with no server and no runtime dependency on a binary. Nothing is stored, nothing
 is sent anywhere.
@@ -88,36 +84,12 @@ These are the original's, unchanged, and they are the reason the app feels the
 way it does. They are listed here because a rewrite is exactly when they quietly
 get "improved", and on this app every one of them is the feel:
 
-| | | |
-|---|---|---|
-| `SCALING_PERIOD_MS` = 900 | one breath of the pulse |
-| `REGISTRATION_TIME_MS` = 420 | a new circle drawing itself in behind its halo |
-| `DRAWING_TIME_MS` = 2500 | the whole window: spin, then a beat to read it |
-| `wheel::SPIN_FRACTION` = 0.55 | of that window, the spin; the rest is the result |
-| `wheel::GATHER_FRACTION` = 0.34 | of the spin, the circles reaching their slots |
-| `wheel::turns_for(n)` = 2 + n | whole turns, so the pointer lands *on* a segment |
+| | |
+|---|---|
+| `SCALING_PERIOD_MS` = 1500 | one breath of the pulse, per the original |
+| `DRAWING_TIME_MS` = 2500 | how long the players present get to be picked |
 | `CHOSEN_PLAYER_ANIMATION_TIME_MS` = 1000 | the winner's colour flooding the screen |
 | `RESTART_DELAY` = 2000 | after the winner lifts, before the next draw |
-
-**These are no longer the original's numbers, deliberately.** The original's
-window and its reset are kept, because they are the game's pacing. Everything
-*inside* the window was measured against how it felt, and three of those were
-wrong:
-
-- The pulse was 1500ms and read as a swell rather than a pulse, because at that
-  rate a circle spends most of its time near a turning point. 900ms puts a full
-  breath in under a second.
-- The circles were 58px across and two of them overlapped into one blob on a phone
-  held in one hand. They are 40.5px now, with the swing reduced from ±12.5% to
-  ±5.5% — smaller *and* livelier, which is the opposite of the usual trade.
-- The spin overran into the reveal and the circles crawled most of the way before
-  snapping together. The spin now takes just over half the window and the circles
-  reach their slots in the first third of it, leaving ~900ms of a landed result.
-
-`WINNER_RADIUS` is recomputed from the same formula on the smaller circles rather
-than carried over: the original's 74.25 was sized to clear a 58px ring, and that
-ring is 40.5px now. The clearance is still the author's 8px, scaled by the same
-swing, and a test pins it.
 
 A circle appears on the frame after `pointerdown` — the same frame the original
 drew it on, because the original also mutated its map in the event handler and
@@ -161,24 +133,18 @@ cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 cargo test --locked
 ```
 
-- `src/chooser.rs` has 29 unit tests over the pointer state machine: add, move,
+- `src/chooser.rs` has 28 unit tests over the pointer state machine: add, move,
   lift, cancel, the two-player minimum, every draw-timer restart rule, winner
   selection and its anchoring, the 2000ms reset and its boundary, the pulse, the
   winner-radius geometry and the colour formula. `tests/shell.rs` asserts the
   file mentions no DOM crate at all.
-- `src/wheel.rs` has 22 unit tests over the spin: that it fits any screen including
-  a 320pt phone, that it is even, that it starts and stops at the top, that the
-  pointer never runs backwards, that it decelerates, that it stops on a player and
-  stays on that player, and that no circle ever snaps back to its finger. Several
-  of those exist because the first version of the code broke them.
-- `tests/shell.rs` (18 tests) asserts the invariants of the committed shell: the
+- `tests/shell.rs` (12 tests) asserts the invariants of the committed shell: the
   page loads the generated bindings rather than a hand-written wasm ABI, exactly
   one `<script>`, no absolute URLs, the original's viewport and
   `touch-action: none` survive, exactly one `__VERSION__`, no `skipWaiting`,
   `dist/` ignored, no build artefact tracked, the original `app.js`/`sw.js`/
-  `manifest.json`/`index.html` are gone, every file the worker precaches is
-  published, the splash exists and cannot swallow the first touch, and no
-  user-visible text names the implementation.
+  `manifest.json`/`index.html` are gone, and every file the worker precaches is
+  published.
 
 There are no browser tests, no Node and no Chromium. `dist/` is gitignored, so
 the release gate's exported tree never has it; `.github/workflows/build.yml` runs
@@ -187,16 +153,6 @@ strays, no unsubstituted `__VERSION__`, bindings that export.
 
 ## Code map
 
-- `wheel.rs`: the spinning selection animation, no DOM and no canvas. Where the
-  wheel sits, how fast the pointer turns, and which player it stops on. The
-  pointer rides `POINTER_OFFSET` *outside* the ring of circles, so it stops beside
-  the winner rather than on it: landing on the circle hides the very thing it is
-  pointing at behind a white dot and a ring of the same colour. It needs
-  no state: given the same players and the same millisecond it draws the same
-  wheel, which is what lets it stay in step with fingers moving underneath it.
-  The circle-to-wheel move is eased, not linear, so the circles arrive rather than
-  snap, and the pointer holds its angle once stopped rather than running on past
-  the player it is resting on.
 - `chooser.rs`: the whole app's behaviour, with no DOM, no clock and no canvas.
   `Chooser` holds the players, the draw window and the chosen player; `Player`
   holds a pointer id, a position and the instant it was chosen. Timing is passed
@@ -205,8 +161,7 @@ strays, no unsubstituted `__VERSION__`, bindings that export.
   from `getrandom`, and a test picks the one it wants to assert about.
 - `ui.rs`: wasm-only. Pointer events in, `requestAnimationFrame` out, and the
   canvas. It holds no rules — every radius, angle and colour it draws comes out
-  of `chooser.rs` and `wheel.rs`. It draws the wheel, the pointer, the hint when
-  fewer than two fingers are down, and the reveal.
+  of `chooser.rs`.
 - `ui.html`: the static shell. One black canvas, one module script whose whole
   body is `import('./app.js').then(m => m.default())`, and a hidden failure UI.
 - `service-worker.js`: caches only a fixed app-shell allowlist, scope-specific
@@ -230,95 +185,9 @@ test:
   circle stays on screen after every other finger has left, because it is the
   hole in the colour, and the app is only reusable once it has gone.
 
-## Why the winner is chosen before the animation
-
-The wheel has to land on the winner, so the winner cannot be a consequence of
-where the pointer stopped — that would make the animation an input to its own
-result, and a finger landing or lifting mid-spin could change who wins.
-`Chooser::pending_winner` therefore fixes the result the instant the last change
-to the glass settles, and the spin is laid out to arrive at it.
-
-It also makes the fairness argument trivial: the result is a random draw taken at
-one moment, and nothing that happens on the screen afterwards can move it. That
-is the claim the native app makes when it says no one can argue with the spinning
-circle, and it is only true if the circle is not the input.
-
-## Two things that are not about speed
-
-## The wheel has fixed segments and a moving pointer
-
-This is the one piece of design that had to be got right twice.
-
-The first version gave each circle's slot angle the same time term as the pointer,
-so **the dots orbited one another** while the pointer chased them. It looked like a
-carousel, not a spinner, and it was unreadable: the eye has to track a dot relative
-to two other moving things instead of relative to the pointer. `wheel::slots` now
-takes only a *gather* value and no time at all, so a player's segment never moves.
-`the_dots_do_not_rotate_around_each_other` is the regression test.
-
-Removing the rotation exposed a second, worse bug that the orbit had been hiding:
-**a fixed number of turns cannot land on a segment of a wheel whose segment count
-is not known until the last finger is down.** 2.15 turns lands 30% of a segment past
-the mark with two players, 75% past it with five, and 5% *short* of it with seven —
-so the pointer came to rest between two circles. `turns_for(players)` is now
-`BASE_TURNS + players`, a whole number by construction, so the pointer always
-finishes back at the mark slot 0 occupies. One extra turn per player costs about
-200ms at this speed, so a table of ten still spins in under two seconds.
-
-## The two loadings
-
-1. **A finger charging**, over `REGISTRATION_TIME_MS`. Its outer ring fills from
-   transparent to that player's own colour, and the inner disc fades in behind it.
-   The original filled its ring from light to dark; loading *towards the colour the
-   player will be* is the same idea with the destination moved to where it belongs,
-   so the ring is both the progress bar and the first thing drawn in that colour.
-   (There was a white halo here before. A halo is a second, competing mark around
-   the one thing the player is looking at; a ring that fills is the same information
-   without the extra shape.)
-2. **The choice.** The white arc sweeping each ring while the wheel spins.
-
-**The draw does not start until the last finger has finished charging.** Without
-that, a player who slapped a finger down as the previous window expired could be
-picked from a wheel whose other circles were still transparent and had not yet moved
-into place — chosen from a screen nobody had seen. `Chooser::ready_at` is that
-moment, and the pointer, the arc and the draw all measure from it, so they cannot
-disagree about when the draw began.
-
-## The winner follows their finger
-
-After the draw the winner is the only player left, and for the whole reveal it is
-the only thing on screen, so their circle tracking their finger is the only feedback
-there is. `draw_reveal` reads the winner's *live* position rather than the one
-recorded at the draw, and `pointer_move` still updates them, so dragging the finger
-drags the expanding colour with it. Once the finger lifts, the position the winner
-lifted at is kept until the app resets — which is the same rule the original had, and
-the reason the reset is two seconds.
-
-## What is not on screen
-
-Nothing. The canvas is the whole interface, and that is a decision rather than an
-oversight:
-
-- **No splash, and no floating icon.** There was one, and it was removed: a logo
-  over black in front of an app whose input is people slapping a phone.
-- **No prompt when the glass is empty.** "Put two or more fingers on the screen"
-  and its "One more finger" variant both existed and both are gone. An instruction
-  across the middle of the screen is in the way of the thing the player is looking
-  at, and the app is meant to be understood by putting a finger down.
-
-What replaced both is a *load* rather than a message: a new finger's ring fills
-with its colour over `REGISTRATION_TIME_MS`. That is the app's first loading — per
-finger, at the moment of arrival, and it is how the app says *I have you* — and it
-needed no text to do it. The second loading is the choice.
-
-The one line of guidance that remains is the meta description, which the player
-sees in the launcher or a share sheet and never while the app is open.
-
-## One deliberate difference
-
-The animation-frame loop is **one** `Closure` for the life of the page. A
-`requestAnimationFrame` callback that forgets a fresh `Closure` every frame leaks
-one JS function per frame.
+One deliberate difference: the animation-frame loop is **one** `Closure` for the
+life of the page. A `requestAnimationFrame` callback that forgets a fresh
+`Closure` every frame leaks one JS function per frame.
 
 ## Known limitations
 
@@ -328,20 +197,11 @@ one JS function per frame.
   `devicePixelRatio` — the original's behaviour, kept so every radius here is a
   CSS pixel and the picture is the picture the author shipped. On a
   high-density screen it is drawn softer than the browser could.
-- `prefers-reduced-motion` is honoured for the splash only. The pulse and the
-  spin are *not* reduced: this is a decision about whether they run, not how fast,
-  and they run at the original's 1500ms and the original's window either way. The
-  pulse is how a player tells their own finger apart from everyone else's, and a
-  chooser whose result appears without a spin is a different app — which is the
-  thing this rewrite was for.
-- The winner buzzes the phone (`navigator.vibrate`, 40ms) once, on the frame the
-  winner is announced. Browsers may ignore it, and iOS Safari always does; it is
-  additive and nothing depends on it.
-- The canvas is drawn at `devicePixelRatio`, capped at 3. The original sized its
-  backing store in CSS pixels, so on any modern phone every circle was being drawn
-  across a third of the pixels it occupied and upscaled by the compositor — which
-  is why the edges looked soft. All arithmetic here is still in CSS pixels; the
-  ratio appears only in `resize` and in one `set_transform`.
+- `prefers-reduced-motion` is not honoured. This is a decision about *whether*
+  the pulse runs, not about its speed — it runs at the original's 1500ms period
+  either way. The pulse is the app, not decoration: it is how a player tells
+  their own finger apart from everyone else's. The original ignored the setting
+  too, and a chooser whose circles do not breathe is a different app.
 - A pointer event is handled before the frame that draws it, and the only work
   in that handler is the state change itself. The screen-reader announcement is
   written from the render loop rather than from the handler, so nothing but the

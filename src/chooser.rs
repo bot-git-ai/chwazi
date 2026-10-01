@@ -17,20 +17,13 @@
 //!
 //! The rules, as the original app had them:
 //!
-//! * A finger down adds a player, who spends [`REGISTRATION_TIME_MS`] drawing
-//!   themselves in behind a halo, and restarts the draw timer -- but the timer
+//! * A finger down adds a player, and restarts the draw timer -- but the timer
 //!   only actually runs when at least [`REQUIRED_PLAYER_COUNT`] players are
 //!   present and nobody has been chosen yet.
 //! * A finger up (or a cancelled touch) removes that player and restarts the
 //!   timer, for the same reason.
-//! * The timer does not start counting until the last finger has finished
-//!   registering, so nobody is ever picked from a wheel they have not seen.
-//! * Arming a draw also *picks* the winner, at random, there and then. The
-//!   spinning animation in [`crate::wheel`] is laid out to land on it, so the
-//!   result is fixed before anything is drawn and cannot be argued with on the
-//!   way there.
-//! * When the timer runs out the chosen player is committed and their colour
-//!   takes the screen; every other player leaves immediately.
+//! * When the timer runs out, one of the players present is chosen at random.
+//!   Choosing ends the draw: every other player leaves immediately.
 //! * Two seconds after the chosen finger lifts, the choice is cleared and a new
 //!   draw can start.
 
@@ -39,17 +32,11 @@ use std::collections::BTreeMap;
 /// A draw needs at least this many players. One finger cannot choose itself.
 pub const REQUIRED_PLAYER_COUNT: usize = 2;
 /// Radius of the solid inner disc.
-///
-/// Smaller than the original's 36, deliberately. The original sized its circles
-/// before anyone knew how many fingers would land; on a phone held in one hand
-/// they are large enough that two of them overlap and the middle of the screen
-/// turns into one indistinct blob. These are quick, light marks whose job is to
-/// say *that* you are in, not to fill the glass.
-pub const INNER_RADIUS: f64 = 25.0;
+pub const INNER_RADIUS: f64 = 36.0;
 /// Gap between the inner disc and the outer ring's centreline.
-pub const OUTER_RADIUS: f64 = 12.0;
+pub const OUTER_RADIUS: f64 = 16.0;
 /// Stroke width of the outer ring.
-pub const OUTER_CIRCLE_WIDTH: f64 = 7.0;
+pub const OUTER_CIRCLE_WIDTH: f64 = 12.0;
 /// How far a player circle's radius swings, in each direction, around its rest
 /// size.
 ///
@@ -59,45 +46,32 @@ pub const OUTER_CIRCLE_WIDTH: f64 = 7.0;
 /// formula. Anyone porting this app from the source will half-expect it to only
 /// grow -- `the_pulse_breathes_symmetrically_around_its_rest_size` is what says
 /// otherwise.
-pub const MAX_PULSE_SCALE: f64 = 0.055;
+pub const MAX_PULSE_SCALE: f64 = 0.125;
 /// How long a draw window lasts once two players are present.
 pub const DRAWING_TIME_MS: f64 = 2500.0;
 /// How long the winner's circle takes to expand across the screen.
 pub const CHOSEN_PLAYER_ANIMATION_TIME_MS: f64 = 1000.0;
 /// One full breath of a player circle's pulse.
-///
-/// The original's 1500ms was half again as slow as this, and read as a swell
-/// rather than a pulse: at that rate the circle spends most of its time near a
-/// turning point, so it looks like it is drifting. 900ms puts a full breath in
-/// under a second, which is what makes it read as alive at a glance.
-pub const SCALING_PERIOD_MS: f64 = 900.0;
-
-/// How long a finger's circle takes to finish registering after it lands.
-///
-/// The first thing the app does with a new finger is *show* it arriving: the
-/// circle draws itself in from nothing over this long, behind a white halo. It is
-/// the same load that the original's arc was, moved to the moment the player
-/// appears rather than to the choice.
-pub const REGISTRATION_TIME_MS: f64 = 420.0;
-
-/// How far past the circle a registering finger's halo sits, as a fraction of the
-/// circle's own size.
-///
-/// Wide enough to read as a ring around the mark rather than as part of it, so
-/// the circle is never hidden behind the thing announcing it.
-pub const HALO_SCALE: f64 = 1.9;
+pub const SCALING_PERIOD_MS: f64 = 1500.0;
 /// Clearance between the winner's ring and the edge of the filled screen.
 pub const CHOSEN_SEPARATION: f64 = 8.0;
 /// How long the chosen finger must be off the glass before the app resets.
 pub const RESTART_DELAY: f64 = 2000.0;
 
-/// Radius the winner's circle takes when its expansion has finished.
+/// Radius of the winner's circle when its expansion has finished.
 ///
-/// With the smaller circles and the pulse's smaller swing, this is recomputed
-/// rather than carried over: the original's 74.25 was sized to clear a 58px ring
-/// at full pulse, and that ring is now 44px, so the same arithmetic would leave a
-/// 30px moat. The gap is still the author's 8px, scaled by the same swing.
-pub const WINNER_RADIUS: f64 = (INNER_RADIUS
+/// The original's own constant, carried over arithmetic for arithmetic: 74.25.
+/// Its evident intent holds exactly. The winner's ring is stroked at a
+/// centreline radius of 52 with a 12px stroke, so its outer edge is 58, which
+/// the pulse swings to 65.25 at its largest -- and the fill stops at 74.25,
+/// leaving precisely the 8px `CHOSEN_SEPARATION` the author asked for at the
+/// tightest point of the breath, and 16.25 at rest. The winner is a hole in the
+/// colour and never touches it.
+///
+/// It is kept rather than "corrected" because a rewrite keeps the author's
+/// numbers, and here they were right. `the_winner_radius_clears_the_winners_own_ring`
+/// pins all of it.
+pub const MIN_WINNER_RADIUS: f64 = (INNER_RADIUS
     + OUTER_RADIUS
     + OUTER_CIRCLE_WIDTH / 2.0
     + CHOSEN_SEPARATION)
@@ -111,8 +85,6 @@ pub struct Player {
     pub id: i32,
     pub x: f64,
     pub y: f64,
-    /// When this finger landed, which is when its halo finishes drawing in.
-    pub joined_at: f64,
     /// When this player was chosen, if it has been.
     ///
     /// Set once, at the instant the draw ended, and never recomputed from a
@@ -171,17 +143,6 @@ pub struct Chooser {
     chosen: Option<i32>,
     /// When the current draw window opened.
     draw_started_at: Option<f64>,
-    /// Which player the current draw will pick, decided when it was armed.
-    ///
-    /// Decided *before* the animation rather than at the end of it. The wheel
-    /// has to land on the winner, so the winner cannot be a consequence of where
-    /// the pointer stopped -- that would make the animation an input to its own
-    /// result. Fixing it up front also makes the fairness argument trivial: the
-    /// result is a random draw taken the instant the last finger settled, and
-    /// nothing that happens on the glass afterwards can move it.
-    ///
-    /// `None` when no draw window is running.
-    pending_winner: Option<usize>,
     /// When the chosen finger lifted, if it has.
     chosen_lifted_at: Option<f64>,
 }
@@ -217,16 +178,6 @@ impl Chooser {
         self.chosen.is_some()
     }
 
-    /// Which player the running draw will pick, as an index into [`Self::players`]
-    /// in the order they are returned.
-    ///
-    /// This is the wheel's destination: the spinning animation is laid out so
-    /// that this player ends up under the pointer. `None` when no draw window is
-    /// running.
-    pub fn pending_winner(&self) -> Option<usize> {
-        self.pending_winner
-    }
-
     /// When the current draw window opened, if one is running.
     ///
     /// The white arc on each player's ring is this timestamp's progress
@@ -240,70 +191,15 @@ impl Chooser {
     /// Exactly the original's `started_timeout`: set when the timer is armed,
     /// cleared the moment it fires -- which is what stops a pointer event
     /// arriving in the same frame as the draw from starting a second one.
-    ///
-    /// True even while players are still registering: the window *is* open, it has
-    /// simply not started counting. See [`Self::ready_at`].
     pub fn is_drawing(&self) -> bool {
         self.draw_started_at.is_some()
-    }
-
-    /// When the draw actually begins counting, if one is open.
-    ///
-    /// A finger's circle charges for [`REGISTRATION_TIME_MS`] after it lands, and
-    /// the draw does not start until the last finger has finished charging. So the
-    /// window opens when the players change and the clock starts a beat later.
-    ///
-    /// Without this, a player who slaps their finger down just as the previous
-    /// window expired would have been picked from a wheel whose other circles were
-    /// still transparent and had not moved into place. The choice would have been
-    /// made from a screen nobody had seen.
-    pub fn ready_at(&self) -> Option<f64> {
-        let started = self.draw_started_at?;
-        // Every finger that is still charging holds the draw back, and the last
-        // one to land decides how long that is.
-        let last_to_land = self
-            .players
-            .values()
-            .map(|player| player.joined_at)
-            .fold(f64::NEG_INFINITY, f64::max);
-        Some(
-            (started + REGISTRATION_TIME_MS).max(last_to_land + REGISTRATION_TIME_MS),
-        )
-    }
-
-    /// Whether the draw has finished waiting for every finger to charge.
-    pub fn is_ready(&self, timestamp: f64) -> bool {
-        self.ready_at()
-            .is_some_and(|ready| timestamp >= ready)
-    }
-
-    /// How far through registering the player at `index` is, 0 to 1.
-    ///
-    /// The first of the app's two loadings, and per finger rather than per draw:
-    /// a mark appears when you put your finger down, growing out of its halo over
-    /// [`REGISTRATION_TIME_MS`], and that is the app saying *I have you*. The
-    /// second loading is the draw.
-    ///
-    /// `None` past the end of the window, so the caller draws no halo at all.
-    pub fn registration(&self, index: usize, timestamp: f64) -> Option<f64> {
-        let player = self.players.values().nth(index)?;
-        Some(
-            ((timestamp - player.joined_at) / REGISTRATION_TIME_MS).clamp(0.0, 1.0),
-        )
-    }
-
-    /// Whether every player has finished registering.
-    pub fn is_registered(&self, timestamp: f64) -> bool {
-        self.players
-            .values()
-            .all(|player| timestamp - player.joined_at >= REGISTRATION_TIME_MS)
     }
 
     /// The white loading arc's progress at `timestamp`, 0 to 1.
     ///
     /// `None` while no draw window is running, which draws no arc at all.
     pub fn draw_progress(&self, timestamp: f64) -> Option<f64> {
-        let started = self.ready_at()?;
+        let started = self.draw_started_at?;
         Some(((timestamp - started) / DRAWING_TIME_MS).clamp(0.0, 1.0))
     }
 
@@ -312,10 +208,7 @@ impl Chooser {
     /// Ignored once someone has been chosen: the winner's screen is showing
     /// until that finger lifts and the app resets, and a new finger landing
     /// during it is not a player.
-    ///
-    /// `winner` is a random index used only if this event arms a draw, and is
-    /// reduced against the player count, so the caller may pass a raw draw.
-    pub fn pointer_down(&mut self, id: i32, x: f64, y: f64, now: f64, winner: usize) {
+    pub fn pointer_down(&mut self, id: i32, x: f64, y: f64, now: f64) {
         if self.chosen.is_some() {
             return;
         }
@@ -325,11 +218,10 @@ impl Chooser {
                 id,
                 x,
                 y,
-                joined_at: now,
                 chosen_at: None,
             },
         );
-        self.restart_draw(now, winner);
+        self.restart_draw(now);
     }
 
     /// A finger moved to `(x, y)`.
@@ -347,10 +239,7 @@ impl Chooser {
     ///
     /// Both mean the same thing to a finger chooser, and the original treated
     /// them identically, so they are one function.
-    ///
-    /// `winner` is as in [`Self::pointer_down`]: a fresh random index, used only
-    /// if this lifts a draw arming. Lifting the winner does not consume it.
-    pub fn pointer_up(&mut self, id: i32, now: f64, winner: usize) {
+    pub fn pointer_up(&mut self, id: i32, now: f64) {
         if self.chosen == Some(id) {
             // The winner is leaving. Everyone else was already cleared at the
             // draw, and this finger stays put as a marker so the filled screen
@@ -363,29 +252,24 @@ impl Chooser {
         if self.players.remove(&id).is_none() {
             return;
         }
-        self.restart_draw(now, winner);
+        self.restart_draw(now);
     }
 
-    /// The draw window has elapsed: commit the winner and begin the reveal.
+    /// A draw window has elapsed: choose one of the players present, at random.
     ///
-    /// The winner was chosen when the window was armed, not here -- see
-    /// [`Self::pending_winner`]. This only carries that decision through: the
-    /// winner's circle starts expanding at `now` and every other player leaves.
-    /// Their fingers are still down; their circles are gone.
-    ///
-    /// Returns the winner's pointer id.
-    pub fn draw(&mut self, now: f64) -> Option<i32> {
+    /// Returns the winner's pointer id. Every other player leaves at once --
+    /// their fingers are still down, but their circles are gone, because the
+    /// original cleared the map around the winner and so did this.
+    pub fn draw(&mut self, now: f64, winner: usize) -> Option<i32> {
         // A draw needs two players and an unclaimed app, whatever the timer
         // thought it was doing.
         if self.players.len() < REQUIRED_PLAYER_COUNT || self.chosen.is_some() {
             return None;
         }
-        // Taken from the armed draw, and reduced against the players *now*
-        // present. The count cannot have changed without the window being
-        // re-armed, so this cannot index out of range -- but reducing here means
-        // a stale index would pick the wrong player rather than panic, and the
-        // window is re-armed on every change, so it cannot be stale either.
-        let index = (self.pending_winner?) % self.players.len();
+        // `winner` is a caller-supplied index so that a test can pin the
+        // randomness and assert on the result. It is reduced here, so the
+        // browser may pass `random_index()` raw.
+        let index = winner % self.players.len();
         let id = *self.players.keys().nth(index)?;
         if let Some(player) = self.players.get_mut(&id) {
             player.chosen_at = Some(now);
@@ -395,7 +279,6 @@ impl Chooser {
         // The window is over: this flag, not the winner, is what stops a
         // pointer event arriving in the same frame from starting another draw.
         self.draw_started_at = None;
-        self.pending_winner = None;
         Some(id)
     }
 
@@ -418,13 +301,7 @@ impl Chooser {
         self.chosen = None;
         self.chosen_lifted_at = None;
         self.draw_started_at = None;
-        self.pending_winner = None;
         true
-    }
-
-    /// When the chosen player was chosen, if one has been.
-    pub fn chosen_at(&self, now: f64) -> Option<f64> {
-        self.chosen()?.chosen_at.or(Some(now))
     }
 
     /// How far the winner's circle has grown at `timestamp`, 0 to 1.
@@ -440,14 +317,14 @@ impl Chooser {
 
     /// The winner's circle radius at `timestamp`, given the viewport size.
     ///
-    /// Grows from zero to [`WINNER_RADIUS`] over the animation, starting
+    /// Grows from zero to [`MIN_WINNER_RADIUS`] over the animation, starting
     /// from the longest screen dimension so the fill sweeps in from off-screen
     /// and the win reads as the screen being claimed rather than a circle
     /// swelling.
     pub fn chosen_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
-        let from = width.max(height).max(WINNER_RADIUS);
-        Some(progress * WINNER_RADIUS + (1.0 - progress) * from)
+        let from = width.max(height).max(MIN_WINNER_RADIUS);
+        Some(progress * MIN_WINNER_RADIUS + (1.0 - progress) * from)
     }
 
     /// Whether the draw timer should be armed for this state.
@@ -465,14 +342,8 @@ impl Chooser {
     /// moving a finger off the table restarts the window: a draw is against
     /// the players present *now*, and the last change to that set is when it
     /// must begin counting.
-    fn restart_draw(&mut self, now: f64, winner: usize) {
-        if self.can_draw() {
-            self.draw_started_at = Some(now);
-            self.pending_winner = Some(winner % self.players.len());
-        } else {
-            self.draw_started_at = None;
-            self.pending_winner = None;
-        }
+    fn restart_draw(&mut self, now: f64) {
+        self.draw_started_at = if self.can_draw() { Some(now) } else { None };
     }
 }
 
@@ -480,29 +351,18 @@ impl Chooser {
 mod tests {
     use super::*;
 
-    /// Two fingers down and a draw armed, with `winner` as the pending player.
-    ///
-    /// The two-step matters: arming picks the winner, committing announces it.
-    /// A test that only cares about the result can use this and ignore the split.
-    fn armed(winner: usize) -> Chooser {
-        let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 100.0, 200.0, 0.0, winner);
-        chooser.pointer_down(2, 300.0, 400.0, 10.0, winner);
-        chooser
-    }
-
     /// A chooser with two fingers down, mid-draw.
     fn drawing() -> Chooser {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 100.0, 200.0, 0.0, 0);
-        chooser.pointer_down(2, 300.0, 400.0, 10.0, 1);
+        chooser.pointer_down(1, 100.0, 200.0, 0.0);
+        chooser.pointer_down(2, 300.0, 400.0, 10.0);
         chooser
     }
 
     #[test]
     fn a_finger_down_is_a_player_at_that_point() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(7, 12.5, 34.0, 0.0, 0);
+        chooser.pointer_down(7, 12.5, 34.0, 0.0);
 
         let player = chooser.players().next().expect("one player");
         assert_eq!(player.id, 7);
@@ -535,7 +395,7 @@ mod tests {
     #[test]
     fn a_finger_up_takes_the_player_away() {
         let mut chooser = drawing();
-        chooser.pointer_up(1, 100.0, 0);
+        chooser.pointer_up(1, 100.0);
 
         assert_eq!(chooser.len(), 1);
         assert!(chooser.players().all(|player| player.id != 1));
@@ -547,7 +407,7 @@ mod tests {
         // `pointer_up` is the whole of lift-and-cancel handling: the original
         // bound both `pointerup` and `pointercancel` to it.
         let mut chooser = drawing();
-        chooser.pointer_up(2, 100.0, 0);
+        chooser.pointer_up(2, 100.0);
 
         assert_eq!(chooser.len(), 1);
         assert!(chooser.players().all(|player| player.id != 2));
@@ -556,96 +416,30 @@ mod tests {
     #[test]
     fn one_finger_is_not_a_draw() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
 
         assert_eq!(chooser.len(), REQUIRED_PLAYER_COUNT - 1);
         assert!(!chooser.is_drawing(), "a draw needs two players");
         assert!(chooser.draw_progress(0.0).is_none(), "and so no arc");
-        assert_eq!(chooser.draw(2500.0), None, "and no winner");
+        assert_eq!(chooser.draw(2500.0, 0), None, "and no winner");
     }
 
     #[test]
-    fn a_second_finger_opens_the_draw() {
+    fn a_second_finger_starts_the_draw() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
-        chooser.pointer_down(2, 50.0, 50.0, 40.0, 1);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 50.0, 50.0, 40.0);
 
         assert!(chooser.is_drawing());
         assert_eq!(chooser.draw_started_at(), Some(40.0));
-        // But it is not *counting* yet: the last finger landed at 40ms and has
-        // REGISTRATION_TIME_MS of charging to do first.
-        assert!(!chooser.is_ready(40.0));
-        assert_eq!(
-            chooser.ready_at(),
-            Some(40.0 + REGISTRATION_TIME_MS),
-            "the draw starts when the last finger is charged"
-        );
-    }
-
-    #[test]
-    fn the_draw_starts_only_after_every_finger_has_charged() {
-        let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
-        chooser.pointer_down(2, 50.0, 50.0, 40.0, 1);
-
-        let ready = chooser.ready_at().expect("a window");
-        assert!(!chooser.is_ready(ready - 1.0), "not before");
-        assert!(chooser.is_ready(ready), "at the instant every circle is full");
-        assert_eq!(chooser.draw_progress(ready), Some(0.0));
-        assert_eq!(
-            chooser.draw_progress(ready + DRAWING_TIME_MS / 2.0),
-            Some(0.5),
-            "and the window runs from there"
-        );
-    }
-
-    #[test]
-    fn a_late_finger_holds_the_draw_back() {
-        // The case this exists for: someone slaps a finger down as the previous
-        // window was expiring. Their circle is still transparent when the clock
-        // would otherwise have fired, so nobody may be picked from it.
-        let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
-        chooser.pointer_down(2, 50.0, 50.0, 0.0, 1);
-        let first_ready = chooser.ready_at().expect("a window");
-        assert!(chooser.is_ready(first_ready));
-
-        // A third finger at the very moment the window was about to fire.
-        chooser.pointer_down(3, 10.0, 10.0, first_ready, 2);
-        assert!(
-            !chooser.is_ready(first_ready),
-            "and it is not ready any more"
-        );
-        let second_ready = chooser.ready_at().expect("a window");
-        assert_eq!(
-            second_ready,
-            first_ready + REGISTRATION_TIME_MS,
-            "pushed back by exactly one registration"
-        );
-        assert!(chooser.is_ready(second_ready));
-    }
-
-    #[test]
-    fn every_finger_gets_its_full_charging_time() {
-        // Two fingers at very different times: the draw waits for the later one,
-        // and the earlier one is not asked to wait twice.
-        let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
-        chooser.pointer_down(2, 50.0, 50.0, 500.0, 1);
-        assert_eq!(chooser.ready_at(), Some(500.0 + REGISTRATION_TIME_MS));
-        // And an earlier finger is charged long before the draw starts.
-        const {
-            assert!(
-                500.0 > REGISTRATION_TIME_MS,
-                "the first finger finished charging before the second landed"
-            )
-        };
+        assert_eq!(chooser.draw_progress(40.0), Some(0.0));
+        assert_eq!(chooser.draw_progress(40.0 + DRAWING_TIME_MS / 2.0), Some(0.5));
     }
 
     #[test]
     fn a_third_finger_restarts_the_draw() {
         let mut chooser = drawing();
-        chooser.pointer_down(3, 10.0, 10.0, 500.0, 0);
+        chooser.pointer_down(3, 10.0, 10.0, 500.0);
 
         // The window counts from the latest change to who is on the glass, so
         // the last finger down gets the whole window.
@@ -655,7 +449,7 @@ mod tests {
     #[test]
     fn a_finger_up_restarts_the_draw() {
         let mut chooser = drawing();
-        chooser.pointer_up(1, 100.0, 0);
+        chooser.pointer_up(1, 100.0);
 
         assert_eq!(chooser.len(), 1);
         assert!(
@@ -664,34 +458,45 @@ mod tests {
         );
 
         // Put the finger back and the window starts again from now.
-        chooser.pointer_down(1, 100.0, 200.0, 200.0, 0);
+        chooser.pointer_down(1, 100.0, 200.0, 200.0);
         assert_eq!(chooser.draw_started_at(), Some(200.0));
     }
 
     #[test]
     fn the_arc_clamps_outside_the_window() {
         let chooser = drawing();
-        let ready = chooser.ready_at().expect("a window");
-        assert_eq!(chooser.draw_progress(ready - 5_000.0), Some(0.0));
-        assert_eq!(chooser.draw_progress(ready + 9_999.0), Some(1.0));
+        assert_eq!(chooser.draw_progress(-5_000.0), Some(0.0));
+        assert_eq!(chooser.draw_progress(9_999.0), Some(1.0));
     }
 
     #[test]
-    fn the_draw_announces_a_player_that_was_present() {
-        for winner in 0..2 {
-            let mut chooser = armed(winner);
-            let chosen = chooser.draw(2500.0).expect("two players, so a winner");
+    fn the_draw_chooses_one_of_the_players_present() {
+        for winner in 0..3 {
+            let mut chooser = drawing();
+            let chosen = chooser
+                .draw(2500.0, winner)
+                .expect("two players, so a winner");
 
-            assert!(chosen == 1 || chosen == 2, "picked from the players");
+            assert!([1, 2].contains(&chosen), "picked from the players");
             assert_eq!(chooser.len(), 1, "the others left");
             assert_eq!(chooser.chosen().map(|player| player.id), Some(chosen));
         }
     }
 
     #[test]
+    fn every_player_can_win() {
+        // The draw is random, but it must be *possible* for every finger on the
+        // glass to be the one that wins.
+        for index in 0..2 {
+            let mut chooser = drawing();
+            assert_eq!(chooser.draw(2500.0, index), Some(index as i32 + 1));
+        }
+    }
+
+    #[test]
     fn the_winner_is_anchored_to_the_instant_of_the_draw() {
-        let mut chooser = armed(0);
-        chooser.draw(2500.0);
+        let mut chooser = drawing();
+        chooser.draw(2500.0, 0);
 
         // A later frame must not restart the expansion.
         assert_eq!(chooser.chosen_progress(2500.0), Some(0.0));
@@ -704,25 +509,25 @@ mod tests {
 
     #[test]
     fn the_winner_survives_lifting_and_a_new_finger_lands_nowhere() {
-        let mut chooser = armed(0);
-        let winner = chooser.draw(2500.0).expect("a winner");
+        let mut chooser = drawing();
+        let winner = chooser.draw(2500.0, 0).expect("a winner");
 
-        chooser.pointer_up(winner, 3000.0, 0);
+        chooser.pointer_up(winner, 3000.0);
         assert_eq!(chooser.len(), 1, "the winner's circle stays put");
         assert_eq!(chooser.chosen().map(|p| p.id), Some(winner));
 
         // The app is not reset yet, so a new finger is not a player.
-        chooser.pointer_down(9, 10.0, 10.0, 3100.0, 0);
+        chooser.pointer_down(9, 10.0, 10.0, 3100.0);
         assert_eq!(chooser.len(), 1);
         assert!(!chooser.is_drawing());
     }
 
     #[test]
     fn the_reset_comes_exactly_two_seconds_after_the_winner_lifts() {
-        let mut chooser = armed(0);
-        let winner = chooser.draw(2500.0).expect("a winner");
+        let mut chooser = drawing();
+        let winner = chooser.draw(2500.0, 0).expect("a winner");
 
-        chooser.pointer_up(winner, 3000.0, 0);
+        chooser.pointer_up(winner, 3000.0);
         assert!(!chooser.tick(3000.0 + RESTART_DELAY - 1.0), "not yet");
         assert!(
             chooser.tick(3000.0 + RESTART_DELAY),
@@ -734,29 +539,29 @@ mod tests {
 
     #[test]
     fn a_reset_chooser_can_draw_again() {
-        let mut chooser = armed(0);
-        let winner = chooser.draw(2500.0).expect("a winner");
-        chooser.pointer_up(winner, 3000.0, 0);
+        let mut chooser = drawing();
+        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        chooser.pointer_up(winner, 3000.0);
         chooser.tick(3000.0 + RESTART_DELAY + 1.0);
 
-        chooser.pointer_down(4, 5.0, 5.0, 6000.0, 0);
-        chooser.pointer_down(5, 6.0, 6.0, 6100.0, 1);
+        chooser.pointer_down(4, 5.0, 5.0, 6000.0);
+        chooser.pointer_down(5, 6.0, 6.0, 6100.0);
 
         assert!(chooser.is_drawing(), "the app is reusable after a reset");
         assert!(chooser.chosen().is_none());
-        assert_eq!(chooser.draw(8600.0), Some(5));
+        assert_eq!(chooser.draw(8600.0, 1), Some(5));
     }
 
     #[test]
     fn a_winner_held_down_does_not_reset_the_app() {
-        let mut chooser = armed(0);
-        let winner = chooser.draw(2500.0).expect("a winner");
+        let mut chooser = drawing();
+        let winner = chooser.draw(2500.0, 0).expect("a winner");
 
         // Still holding the winner: there is no "lifted" moment, so no reset,
         // however long the page is left alone.
         assert!(!chooser.tick(1_000_000.0));
         assert!(chooser.is_chosen());
-        chooser.pointer_up(winner, 1_000_000.0, 0);
+        chooser.pointer_up(winner, 1_000_000.0);
         assert!(!chooser.tick(1_000_000.0 + RESTART_DELAY - 1.0));
         assert!(chooser.tick(1_000_000.0 + RESTART_DELAY + 1.0));
     }
@@ -764,9 +569,9 @@ mod tests {
     #[test]
     fn a_draw_while_a_winner_is_showing_does_nothing() {
         let mut chooser = drawing();
-        chooser.draw(2500.0);
+        chooser.draw(2500.0, 0);
 
-        assert_eq!(chooser.draw(3000.0), None);
+        assert_eq!(chooser.draw(3000.0, 1), None);
         assert_eq!(chooser.len(), 1, "still one player");
         assert!(chooser.is_chosen(), "still chosen");
     }
@@ -774,7 +579,7 @@ mod tests {
     #[test]
     fn a_lift_of_a_pointer_that_is_not_down_does_nothing() {
         let mut chooser = drawing();
-        chooser.pointer_up(42, 100.0, 0);
+        chooser.pointer_up(42, 100.0);
 
         assert_eq!(chooser.len(), 2);
         // And it did not count as a change to the players, so the window the
@@ -785,9 +590,9 @@ mod tests {
     #[test]
     fn a_draw_with_one_player_does_nothing() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
 
-        assert_eq!(chooser.draw(2500.0), None);
+        assert_eq!(chooser.draw(2500.0, 0), None);
         assert!(!chooser.is_chosen());
     }
 
@@ -795,8 +600,8 @@ mod tests {
     fn the_winner_index_is_taken_against_the_players_actually_present() {
         // Indices come from a random draw, so a caller may pass anything; an
         // out-of-range index must still name a real player.
-        let mut chooser = armed(17);
-        assert_eq!(chooser.draw(2500.0), Some(2), "17 % 2 == 1");
+        let mut chooser = drawing();
+        assert_eq!(chooser.draw(2500.0, 17), Some(2), "17 % 2 == 1");
     }
 
     #[test]
@@ -876,63 +681,42 @@ mod tests {
                 < 1e-9,
             "the pulse does not drift with the clock"
         );
-        // Anchored to the first frame, so a finger joining later is still in step
-        // with the others: the pulse depends on elapsed time since the start, not
-        // on the clock. The first version of this test compared two timestamps
-        // that happened to differ by a whole period under the old 1500ms and do
-        // not under 900ms -- it was passing by coincidence, not by the property.
+        // Anchored to the first frame, so a finger joining later is still in
+        // step with the others.
         assert!(
-            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(7_000.0, 0.0)).abs() < 1e-12,
-            "two timestamps the same age since their start breathe together"
-        );
-        assert!(
-            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(1_000.0, 0.0)).abs() > 1e-6,
-            "timestamps at different ages do not"
+            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(1_000.0, 0.0)).abs() < 1e-12,
+            "every player breathes in step, whenever it arrived"
         );
     }
 
     #[test]
     fn the_winner_radius_starts_off_screen_and_settles_at_the_minimum() {
-        let mut chooser = armed(0);
-        chooser.draw(0.0);
+        let mut chooser = drawing();
+        chooser.draw(0.0, 0);
 
         let (width, height) = (800.0, 1600.0);
         assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
         assert_eq!(
             chooser.chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, width, height),
-            Some(WINNER_RADIUS)
+            Some(MIN_WINNER_RADIUS)
         );
         assert_eq!(
             chooser.chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, width, height),
-            Some((WINNER_RADIUS + 1600.0) / 2.0)
+            Some((MIN_WINNER_RADIUS + 1600.0) / 2.0)
         );
         assert_eq!(chooser.chosen_radius(0.0, width, height), Some(1600.0));
     }
 
     #[test]
     fn the_winner_radius_never_collapses_on_a_tiny_screen() {
-        // The starting radius is at least `WINNER_RADIUS`, so a very small
+        // The starting radius is at least `MIN_WINNER_RADIUS`, so a very small
         // viewport does not make the circle shrink as it grows in.
-        let mut chooser = armed(0);
-        chooser.draw(0.0);
+        let mut chooser = drawing();
+        chooser.draw(0.0, 0);
         assert_eq!(
             chooser.chosen_radius(0.0, 10.0, 10.0),
-            Some(WINNER_RADIUS)
+            Some(MIN_WINNER_RADIUS)
         );
-    }
-
-    #[test]
-    fn the_winner_keeps_their_position_while_their_finger_moves() {
-        // After a draw the winner is the only player left, and the reveal is the
-        // only thing on screen -- so their circle following their finger is the
-        // only feedback there is. `pointer_move` therefore has to keep working on
-        // the winner alone, which it does because it is an ordinary player update.
-        let mut chooser = armed(1);
-        let winner = chooser.draw(2500.0).expect("a winner");
-        chooser.pointer_move(winner, 300.0, 400.0);
-        let player = chooser.chosen().expect("the winner is still a player");
-        assert_eq!((player.x, player.y), (300.0, 400.0));
-        assert_eq!(chooser.len(), 1, "and still the only one");
     }
 
     #[test]
@@ -947,43 +731,32 @@ mod tests {
         // The one geometric claim the constant exists for: at full pulse the
         // winner's ring sits strictly inside the finished fill, so the winner
         // reads as a hole in the colour rather than a ring painted over it.
-        //
-        // This is the original's formula on the smaller circles. Its ring had a
-        // 58px outer edge and a 74.25px fill; this has a 40.5px edge and a 51.17px
-        // fill. Same arithmetic, same intent, same clearance.
-        //
         // The ring is stroked at a *centreline* radius of `INNER + OUTER`, half
-        // the stroke width to either side, so its outer edge is 3.5px further out.
+        // the stroke width to either side, so its outer edge is 6px further out:
+        // 58 at rest.
         let centreline = INNER_RADIUS + OUTER_RADIUS;
         let outer_edge = centreline + OUTER_CIRCLE_WIDTH / 2.0;
-        assert_eq!(centreline, 37.0);
-        assert_eq!(outer_edge, 40.5);
+        assert_eq!(outer_edge, 58.0);
+        assert_eq!(MIN_WINNER_RADIUS, 74.25);
 
-        // The author's dimensioning survives the change of scale: at the top of
-        // the pulse -- the tightest the ring ever gets, and therefore the only
-        // moment the clearance matters -- the fill clears it by exactly
-        // CHOSEN_SEPARATION, scaled by the same swing.
-        // Compared with a tolerance, not exactly: both sides of this subtraction
-        // are a product of a half-integer constant and 1.055, so the results differ
-        // in the last bit -- 8.439999999999998 against 8.44. An exact `assert_eq!`
-        // here would be asserting on float rounding, which is not what this test is
-        // about.
-        assert!(
-            (WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE)
-                - CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE))
-                .abs()
-                < 1e-9,
-            "the fill clears the ring by the author's own separation, not              {} vs {}",
-            WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE),
+        // Clearance beyond the ring's outer edge at the pulse's lowest point --
+        // which is where the pulse is smallest and the ring is closest to the
+        // edge of the fill -- and a good deal more at the top of the swing.
+        assert_eq!(MIN_WINNER_RADIUS - outer_edge, 16.25, "at rest");
+        assert_eq!(
+            MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE),
             CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE),
+            "and the original's constant is dimensioned so the winner's ring clears \
+             the fill by exactly CHOSEN_SEPARATION at the top of the pulse -- the \
+             tightest it is ever, and still a gap"
         );
-        assert!(
-            WINNER_RADIUS > outer_edge * (1.0 + MAX_PULSE_SCALE),
-            "and the ring is strictly inside the fill at full pulse"
-        );
-        // The inner disc, at either end of the pulse, is well inside it too.
-        const { assert!(INNER_RADIUS * (1.0 - MAX_PULSE_SCALE) < WINNER_RADIUS) };
-        const { assert!(WINNER_RADIUS > 0.0) };
+        assert_eq!(MIN_WINNER_RADIUS - outer_edge * (1.0 + MAX_PULSE_SCALE), 9.0);
+        // The winner's inner disc is always well inside the fill, at either end
+        // of the pulse, so the winner stays visible once the fill has settled.
+        // A compile-time check: this is arithmetic on constants, and a constant
+        // that stopped holding would be a change to what the app looks like.
+        const { assert!(INNER_RADIUS * (1.0 - MAX_PULSE_SCALE) < MIN_WINNER_RADIUS) };
+        assert_eq!(MIN_WINNER_RADIUS, 74.25, "the original's own constant");
     }
 
     #[test]
@@ -993,10 +766,10 @@ mod tests {
         // which index it passes in.
         fn run() -> Chooser {
             let mut chooser = Chooser::new();
-            chooser.pointer_down(3, 1.0, 2.0, 0.0, 0);
-            chooser.pointer_down(1, 3.0, 4.0, 0.0, 1);
+            chooser.pointer_down(3, 1.0, 2.0, 0.0);
+            chooser.pointer_down(1, 3.0, 4.0, 0.0);
             chooser.pointer_move(3, 9.0, 9.0);
-            chooser.draw(DRAWING_TIME_MS);
+            chooser.draw(DRAWING_TIME_MS, 1);
             chooser
         }
         assert_eq!(run(), run());

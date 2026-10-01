@@ -21,7 +21,6 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::Event;
 
 use crate::chooser::{self, Chooser, Player};
-use crate::wheel;
 
 /// A full turn of the circle, and the arc every stroke sweeps.
 const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
@@ -43,28 +42,6 @@ struct App {
     /// `performance.now()` at the first frame, which anchors the pulse so every
     /// circle breathes in step.
     start_time: f64,
-    /// When the last draw was won, and by whom, for as long as the winner's
-    /// colour is on screen.
-    ///
-    /// A separate record rather than the chooser's own winner, because the
-    /// chooser forgets a player the instant their finger lifts -- and the colour
-    /// that floods the screen has to stay that colour and stay centred on where
-    /// that finger *was*, for the full second and a bit that the reveal lasts.
-    /// Without this the circle would re-centre on the last finger position
-    /// recorded, or vanish mid-reveal.
-    last_winner: Option<Winner>,
-    /// The screen's device pixel ratio, so the canvas can be drawn at full
-    /// resolution.
-    scale: f64,
-}
-
-/// A won draw, kept after the finger has gone.
-#[derive(Debug, Clone, Copy)]
-struct Winner {
-    id: i32,
-    x: f64,
-    y: f64,
-    at: f64,
 }
 
 /// The animation-frame closure.
@@ -101,33 +78,22 @@ fn run() -> Result<(), JsValue> {
         .dyn_into::<web_sys::CanvasRenderingContext2d>()?;
 
     // The canvas's drawing surface is its width and height in device pixels, and
-    // assigning either clears it, so this happens before the first frame and on
-    // every resize.
+    // assigning either clears it, so this happens before the first frame and
+    // on every resize.
     resize(&canvas);
-    let scale = device_pixel_ratio();
 
     let app = Rc::new(RefCell::new(App {
         chooser: Chooser::new(),
         start_time: now(),
-        last_winner: None,
-        scale,
     }));
-    {
-        let app = Rc::clone(&app);
-        // A window can move between displays -- a phone dragged to a monitor, a
-        // browser tab dragged between a Retina and a non-Retina screen. The scale
-        // is part of the app's state so that the draw code reads one value rather
-        // than reaching for the window every frame.
-        listen(&window, "resize", {
-            let canvas = canvas.clone();
-            move |_| {
-                resize(&canvas);
-                let scale = device_pixel_ratio();
-                borrow(&app, |app| app.scale = scale);
-                Ok(())
-            }
-        })?;
-    }
+
+    listen(&window, "resize", {
+        let canvas = canvas.clone();
+        move |_| {
+            resize(&canvas);
+            Ok(())
+        }
+    })?;
 
     // Pointer events, which on a touch screen *are* the fingers. A mouse sends
     // the same events, so the chooser is usable on a desktop too.
@@ -137,8 +103,7 @@ fn run() -> Result<(), JsValue> {
             let event: web_sys::PointerEvent = event.dyn_into()?;
             let (id, x, y) = at(&event);
             let count = borrow(&app, |app| {
-                app.chooser
-                    .pointer_down(id, x, y, now(), random_index(16));
+                app.chooser.pointer_down(id, x, y, now());
                 app.chooser.len()
             });
             announce_players(count);
@@ -162,8 +127,7 @@ fn run() -> Result<(), JsValue> {
             move |event| {
                 let event: web_sys::PointerEvent = event.dyn_into()?;
                 let count = borrow(&app, |app| {
-                    app.chooser
-                        .pointer_up(event.pointer_id(), now(), random_index(16));
+                    app.chooser.pointer_up(event.pointer_id(), now());
                     app.chooser.len()
                 });
                 announce_players(count);
@@ -183,8 +147,6 @@ fn run() -> Result<(), JsValue> {
     })?;
 
     register_service_worker();
-    // Nothing between the first frame and the canvas: no splash to take down, no
-    // prompt to show. The app opens straight into being the thing you touch.
     start_loop(Rc::clone(&app), canvas, context);
     Ok(())
 }
@@ -231,22 +193,15 @@ fn schedule(frame: &Rc<Frame>) {
 
 /// Draw one frame. Returns the winner, if this frame drew one.
 ///
-/// Three things happen here that have no event of their own, because all three
-/// are *time passing* rather than something a finger did, and this loop already
+/// Two things happen here that have no event of their own, because both are
+/// *time passing* rather than something a finger did, and this loop already
 /// runs on a clock:
 ///
 /// * the reset, due two seconds after the winner lifts;
 /// * the draw itself, due `DRAWING_TIME_MS` after the last change to who is on
 ///   the glass. Running it here rather than in a `setTimeout` means the winner
 ///   and the frame that shows the winner are the same instant, and a frame that
-///   arrives late draws a late winner instead of a stale one;
-/// * the haptics, on the one frame the winner is announced.
-///
-/// The winner is committed here, at the end of the window, and the spinning
-/// animation before it was laid out to land on the player already chosen in
-/// [`Chooser::pending_winner`] -- so the animation reveals a result rather than
-/// producing one, and a finger landing or lifting mid-spin cannot change who
-/// wins.
+///   arrives late draws a late winner instead of a stale one.
 fn render(
     app: &Rc<RefCell<App>>,
     canvas: &web_sys::HtmlCanvasElement,
@@ -257,326 +212,82 @@ fn render(
         let mut announced = None;
         app.chooser.tick(timestamp);
 
-        let ready_since = app.chooser.ready_at();
-        if let Some(since) = ready_since {
+        let drawing_since = app.chooser.draw_started_at();
+        if let Some(since) = drawing_since {
             if timestamp - since >= chooser::DRAWING_TIME_MS {
                 // The number of players is read before the draw, because the
                 // draw removes all but the winner.
                 let of = app.chooser.len();
-                if let Some(winner) = app.chooser.draw(timestamp) {
-                    // The one moment the whole app is about, so the one moment it
-                    // speaks: a buzz, for whoever is not looking at the screen.
-                    buzz();
-                    // The chooser keeps only the winner now; where they were and
-                    // when is the reveal's business, so it is recorded here.
-                    let won = app.chooser.chosen().map(|player| Winner {
-                        id: player.id,
-                        x: player.x,
-                        y: player.y,
-                        at: timestamp,
-                    });
-                    app.last_winner = won;
+                if let Some(winner) = app.chooser.draw(timestamp, random_index(of)) {
                     announced = Some((winner, of));
                 }
             }
         }
 
         let start_time = app.start_time;
-        let last_winner = app.last_winner;
-        paint(
-            &app.chooser,
-            last_winner,
-            app.scale,
-            canvas,
-            context,
-            timestamp,
-            start_time,
-        );
+        paint(&app.chooser, canvas, context, timestamp, start_time);
         announced
     })
 }
 
-/// Draw the whole screen.
-///
-/// Three states, in the order the eye meets them:
-///
-/// * **nothing yet** -- the hint, so the first finger has something to arrive at;
-/// * **drawing** -- the players on the wheel, spinning, with the white arc
-///   closing on each of them;
-/// * **won** -- the winner's colour flooding the screen.
-///
-/// The reveal reads from [`App::last_winner`] rather than the chooser's live
-/// winner, so it keeps its position and colour after the winning finger lifts.
+/// Draw the whole screen: the winner's fill if there is a winner, every player
+/// otherwise.
 fn paint(
     app: &Chooser,
-    last_winner: Option<Winner>,
-    scale: f64,
     canvas: &web_sys::HtmlCanvasElement,
     context: &web_sys::CanvasRenderingContext2d,
     timestamp: f64,
     start_time: f64,
 ) {
-    // Everything below draws in CSS pixels. The canvas is `scale` times that in
-    // device pixels, so the transform is what makes a circle 51 CSS pixels across
-    // land on 51 * device pixels of glass instead of being stretched over 51.
-    let _ = context.set_transform(scale, 0.0, 0.0, scale, 0.0, 0.0);
-    let (width, height) = (
-        f64::from(canvas.width()) / scale,
-        f64::from(canvas.height()) / scale,
-    );
+    let (width, height) = (f64::from(canvas.width()), f64::from(canvas.height()));
     context.clear_rect(0.0, 0.0, width, height);
 
     let pulse = chooser::pulse_scale(timestamp, start_time);
 
-    // The reveal: a colour flooding the screen from the winner's circle, and the
-    // winner still visible inside it as a hole.
-    if let Some(winner) = last_winner.filter(|_| app.chosen().is_some()) {
-        draw_reveal(context, &winner, app, width, height, timestamp, pulse);
-        return;
-    }
     if let Some(winner) = app.chosen() {
-        let won = Winner {
-            id: winner.id,
-            x: winner.x,
-            y: winner.y,
-            at: app.chosen_at(timestamp).unwrap_or(timestamp),
-        };
-        draw_reveal(context, &won, app, width, height, timestamp, pulse);
-        return;
-    }
-
-    let players: Vec<(i32, f64, f64)> = app.players().map(|p| (p.id, p.x, p.y)).collect();
-
-    // Drawing. With fewer than two fingers there is no wheel to show, but the
-    // circles still register: a player putting their finger down sees it arrive,
-    // which is the whole of the app's feedback before there is a choice to make.
-    if players.len() < chooser::REQUIRED_PLAYER_COUNT {
-        for (index, (id, x, y)) in players.iter().enumerate() {
-            let loaded = app.registration(index, timestamp).unwrap_or(1.0);
-            let here = Player {
-                id: *id,
-                x: *x,
-                y: *y,
-                joined_at: f64::NEG_INFINITY,
-                chosen_at: None,
-            };
-            draw_player(context, &here, pulse, 0.0, loaded);
-        }
-        return;
-    }
-
-    // Drawing. The wheel is a function of the players and the clock alone, so it
-    // needs no state: the same hands on the glass and the same millisecond always
-    // give the same wheel, which is what lets it stay in step while fingers move
-    // underneath it.
-    let window = chooser::DRAWING_TIME_MS;
-    let elapsed = timestamp - app.ready_at().unwrap_or(timestamp);
-    let gather = wheel::gather_progress(elapsed, window);
-    let slots = wheel::slots(&players, gather, width, height);
-    // `elapsed` is measured from the moment the app is ready, so it is zero while
-    // fingers are still charging and the whole window is spent spinning. That is
-    // the same instant `ready_at` returns, so the pointer, the arc and the draw
-    // cannot disagree about when the draw began.
-    let spin = wheel::spin_progress(elapsed, window);
-    let turns = wheel::turns_for(players.len());
-    let arc = app.draw_progress(timestamp).unwrap_or(0.0);
-
-    // Faint spokes first, so the circles sit on something. This is the one piece
-    // of chrome the app has ever had, and it earns its place: without it the
-    // circles drift together mid-spin and the eye loses track of which is which.
-    draw_spokes(context, &players, &slots);
-
-    for (index, (id, _, _)) in players.iter().enumerate() {
-        let slot = slots[index];
-        let loaded = app.registration(index, timestamp).unwrap_or(1.0);
-        let landing = app.pending_winner() == Some(index);
-        let here = Player {
-            id: *id,
-            x: slot.x,
-            y: slot.y,
-            joined_at: f64::NEG_INFINITY,
-            chosen_at: None,
-        };
-        draw_player(
-            context,
-            &here,
-            // The winner's circle grows slightly as the pointer closes on it, so
-            // the eye is pulled to the right place before the result is announced.
-            pulse * if landing { landing_grow(spin) } else { 1.0 },
-            arc,
-            loaded,
-        );
-    }
-
-    draw_pointer(
-        context,
-        &players,
-        &slots,
-        elapsed,
-        window,
-        &View { width, height, turns },
-    );
-}
-
-/// The winner's colour taking the screen, with the winner as a hole in it.
-fn draw_reveal(
-    context: &web_sys::CanvasRenderingContext2d,
-    winner: &Winner,
-    app: &Chooser,
-    width: f64,
-    height: f64,
-    timestamp: f64,
-    pulse: f64,
-) {
-    let progress = app
-        .chosen_progress(timestamp)
-        .unwrap_or_else(|| {
-            ((timestamp - winner.at) / chooser::CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0)
-        });
-
-    // The winner's finger, if it is still down. The chooser keeps only the winner
-    // after a draw, and its `pointer_move` still updates that player, so the live
-    // position is one lookup -- and the whole reveal follows it.
-    let live = app
-        .chosen()
-        .filter(|player| player.id == winner.id)
-        .map_or((winner.x, winner.y), |player| (player.x, player.y));
-    let (cx, cy) = live;
-    // The same radius curve as the original: from off-screen down to just
-    // clearing the winner's own ring.
-    let from = width.max(height).max(chooser::WINNER_RADIUS);
-    let radius = progress * chooser::WINNER_RADIUS + (1.0 - progress) * from;
-
-    match web_sys::Path2d::new() {
-        Ok(path) => {
-            path.rect(0.0, 0.0, width, height);
-            if path.arc(cx, cy, radius, 0.0, TWO_PI).is_ok() {
-                context.set_fill_style_str(&Player::color(winner.id));
-                context.fill_with_path_2d_and_winding(&path, web_sys::CanvasWindingRule::Evenodd);
+        if let Some(radius) = app.chosen_radius(timestamp, width, height) {
+            // A rectangle and a circle in one path, filled even-odd: the circle
+            // is a hole in the colour that floods the screen, so the winner
+            // stays visible after the fill has finished. The radius the
+            // chooser returns is what leaves the winner's own ring showing
+            // through it.
+            match web_sys::Path2d::new() {
+                Ok(path) => {
+                    path.rect(0.0, 0.0, width, height);
+                    if path
+                        .arc(winner.x, winner.y, radius, 0.0, TWO_PI)
+                        .is_ok()
+                    {
+                        context.set_fill_style_str(&winner.color_of());
+                        context.fill_with_path_2d_and_winding(
+                            &path,
+                            web_sys::CanvasWindingRule::Evenodd,
+                        );
+                    }
+                }
+                Err(error) => show_failure(&describe(&error)),
             }
         }
-        Err(error) => show_failure(&describe(&error)),
-    }
-    // The winner alone, at full pulse, and never a loading arc: the draw is over,
-    // and an arc sweeping its ring would read as a second, still-running draw.
-    // The winner's circle follows their finger for the whole reveal. `winner` was
-    // recorded at the draw, and this is the same pointer id, so if that finger is
-    // still down its live position wins: the colour expands from wherever the
-    // winner's finger actually is, and drags with it.
-    let here = Player {
-        id: winner.id,
-        x: cx,
-        y: cy,
-        joined_at: f64::NEG_INFINITY,
-        chosen_at: None,
-    };
-    draw_player(context, &here, pulse, 1.0, 1.0);
-}
-
-/// How much larger the landing player's circle is at the end of the spin.
-///
-/// Only in the last stretch, and only by a little: enough to pull the eye, not
-/// so much that it looks like a second highlight. Eased out, so it grows with the
-/// pointer's own deceleration rather than against it.
-fn landing_grow(spin: f64) -> f64 {
-    const MAX: f64 = 1.12;
-    ((spin - 0.7) / 0.3).clamp(0.0, 1.0).powi(2) * (MAX - 1.0) + 1.0
-}
-
-/// The faint lines from the centre to each circle.
-///
-/// `alpha` is deliberately low and the width hairline: this is a hint that the
-/// circles are in a wheel, not decoration, and anything stronger competes with
-/// the colours it is meant to organise.
-fn draw_spokes(
-    context: &web_sys::CanvasRenderingContext2d,
-    players: &[(i32, f64, f64)],
-    slots: &[wheel::Slot],
-) {
-    context.save();
-    context.set_line_width(1.0);
-    context.set_stroke_style_str("rgba(255, 255, 255, 0.10)");
-    for ((_, px, py), slot) in players.iter().zip(slots) {
-        let (slot_x, slot_y) = (slot.x, slot.y);
-        // From the circle to where it is going, not to the centre: a spoke to the
-        // centre under a circle on the ring would be entirely hidden.
-        let (dx, dy) = (slot_x - px, slot_y - py);
-        let length = dx.hypot(dy);
-        if length < 1.0 {
-            continue;
-        }
-        context.begin_path();
-        context.move_to(px + dx * 0.35, py + dy * 0.35);
-        context.line_to(slot_x - dx / length * 8.0, slot_y - dy / length * 8.0);
-        context.stroke()
-    }
-    context.restore();
-}
-
-/// The pointer sweeping the wheel.
-///
-/// A single small white dot riding the ring, which is all it needs to be: the
-/// wheel's own rotation is the spectacle, and a pointer that drew attention to
-/// itself would compete with the landing.
-/// The screen's size, in CSS pixels, with the wheel's turn count.
-struct View {
-    width: f64,
-    height: f64,
-    turns: f64,
-}
-
-fn draw_pointer(
-    context: &web_sys::CanvasRenderingContext2d,
-    players: &[(i32, f64, f64)],
-    slots: &[wheel::Slot],
-    elapsed: f64,
-    window: f64,
-    view: &View,
-) {
-    let Some(landed) = wheel::landed_on(slots, elapsed, window, view.turns) else {
+        // The winner alone, at full pulse, and never a loading arc: the draw is
+        // over, and the arc sweeping the rest of its ring would read as a
+        // second, still-running draw.
+        draw_player(context, winner, pulse, 1.0);
         return;
-    };
-    let colour = Player::color(players[landed].0);
-    let (px, py) = wheel::pointer_position(elapsed, window, view.turns, view.width, view.height);
+    }
 
-    // The landing player's colour as a halo, so the dot is legible over a circle
-    // of the same colour and does not vanish into it.
-    context.begin_path();
-    let _ = context.arc(px, py, 16.0, 0.0, TWO_PI);
-    context.set_fill_style_str("rgba(0, 0, 0, 0.55)");
-    context.fill();
-
-    context.begin_path();
-    let _ = context.arc(px, py, 9.0, 0.0, TWO_PI);
-    context.set_fill_style_str("#ffffff");
-    context.fill();
-
-    // And a thin ring in the winner's colour just inside it, which is the moment
-    // the eye reads as "this one" rather than "a dot stopped somewhere".
-    context.begin_path();
-    let _ = context.arc(px, py, 22.0, 0.0, TWO_PI);
-    context.set_line_width(3.0);
-    context.set_fill_style_str(&colour);
-    context.set_stroke_style_str(&colour);
-    context.stroke()
+    let progress = app.draw_progress(timestamp).unwrap_or(0.0);
+    for player in app.players() {
+        draw_player(context, player, pulse, progress);
+    }
 }
 
 /// One player: a filled inner disc, a ring around it, and the white arc that
 /// counts the draw down.
-/// `loaded` is the first of the app's two loadings: how far this circle's ring
-/// has filled, 0 at the moment the finger lands and 1 when it is fully charged.
-///
-/// The ring fills with the player's own colour rather than a white halo. The
-/// original filled the ring from light to dark; loading *towards the colour the
-/// player will be* is the same idea with the destination moved to where it
-/// belongs, so the ring is both the progress indicator and the first thing drawn
-/// in that player's colour.
 fn draw_player(
     context: &web_sys::CanvasRenderingContext2d,
     player: &Player,
     pulse: f64,
     loading: f64,
-    loaded: f64,
 ) {
     let colour = player.color_of();
     let ring_radius = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * pulse;
@@ -597,26 +308,14 @@ fn draw_player(
         show_failure(&describe(&error));
         return;
     }
-    // The disc fades in over the second half of the registration: the ring is the
-    // thing that loads, and the disc arrives as the ring fills.
-    context.set_global_alpha((loaded * loaded).clamp(0.0, 1.0));
     context.set_fill_style_str(&colour);
     context.fill();
-    context.set_global_alpha(1.0);
 
-    // The ring, loading: transparent at the moment the finger lands, the player's
-    // own colour when it is charged. `globalAlpha` rather than a colour function
-    // so the alpha composites with whatever is behind the canvas instead of being
-    // baked into one string.
-    context.save();
-    context.set_global_alpha(loaded.clamp(0.0, 1.0));
     context.begin_path();
-    if context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI).is_ok() {
-        context.set_line_width(ring_width);
-        context.set_stroke_style_str(&colour);
-        context.stroke();
-    }
-    context.restore();
+    let _ = context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI);
+    context.set_line_width(ring_width);
+    context.set_stroke_style_str(&colour);
+    context.stroke();
 
     // The arc spans from `2*PI*(1-loading)/2` to `2*PI*(1-loading)*3/2`: a gap of
     // a quarter turn at the start of the window, closing to nothing by the end,
@@ -693,39 +392,21 @@ fn now() -> f64 {
         .map_or(0.0, |performance| performance.now())
 }
 
-/// The screen's device pixel ratio, never less than 1.
+/// Size the canvas to the window, in CSS pixels.
 ///
-/// Capped at 3: a 4x ratio would quadruple the pixels for no visible gain on a
-/// screen whose pixels are already smaller than the circles, and costs battery on
-/// a phone that is meant to be handed round.
-fn device_pixel_ratio() -> f64 {
-    web_sys::window()
-        .map_or(1.0, |window| window.device_pixel_ratio())
-        .clamp(1.0, 3.0)
-}
-
-/// Size the canvas to the window, and to the screen's pixels.
-///
-/// The canvas's drawing surface is its `width`/`height` in *device* pixels. The
-/// original set those to `innerWidth`/`innerHeight` and drew in CSS pixels, so on
-/// any high-density screen -- every modern phone -- a 51px circle was being drawn
-/// across about 51 physical pixels and upscaled by the compositor. That is the
-/// single biggest reason the edges looked soft: not anti-aliasing, resolution.
-///
-/// So the backing store is now `css size * devicePixelRatio`, and everything is
-/// drawn through a transform of the same ratio, which keeps all the arithmetic in
-/// this file in CSS pixels. A CSS pixel is still a CSS pixel in every constant and
-/// every test; the device ratio only ever appears here and in the one
-/// `set_transform` call.
+/// Not scaled by `devicePixelRatio`, on purpose: the original sized its canvas
+/// to `innerWidth`/`innerHeight` and drew in the same units, so every radius in
+/// this file is a CSS pixel and the picture is the picture the author shipped. A
+/// high-density screen draws it softer than the browser could, which is a
+/// rewrite's job to keep, not to redesign.
 fn resize(canvas: &web_sys::HtmlCanvasElement) {
     let Some(window) = web_sys::window() else {
         return;
     };
     let width = window.inner_width().ok().and_then(dimension).unwrap_or(1);
     let height = window.inner_height().ok().and_then(dimension).unwrap_or(1);
-    let scale = device_pixel_ratio();
-    canvas.set_width((f64::from(width) * scale).round().max(1.0) as u32);
-    canvas.set_height((f64::from(height) * scale).round().max(1.0) as u32);
+    canvas.set_width(width.max(1));
+    canvas.set_height(height.max(1));
 }
 
 /// Borrow the app for the length of `body`.
@@ -885,18 +566,11 @@ fn script_belongs_to_app(script: &str, ours: &str) -> bool {
 }
 
 /// Say how many fingers are down, for anyone who cannot see the canvas.
-///
-/// This is a screen-reader live region and nothing else -- it is clipped off the
-/// screen for sighted players, so the "one more" prompt this used to carry is
-/// gone from the app entirely. The count itself is the useful part: it is how a
-/// non-sighted player knows whether they are alone on the glass.
 fn announce_players(count: usize) {
     let text = if count >= chooser::REQUIRED_PLAYER_COUNT {
         format!("{count} fingers down. Choosing in a moment.")
-    } else if count == 1 {
-        "1 finger down.".to_string()
     } else {
-        "No fingers down.".to_string()
+        format!("{count} finger down. Put two or more fingers on the screen.")
     };
     status(&text);
 }
@@ -908,26 +582,6 @@ fn announce_winner(winner: i32, of: usize) {
         winner_position(winner)
     ));
 }
-
-/// Buzz once when a winner is announced.
-///
-/// The native Chwazi app vibrates here, and it is worth keeping: the phone is in
-/// somebody's hand and being passed around a table, so the buzz is the one piece
-/// of the result that reaches the person who is not looking at the screen -- the
-/// one who has to go first.
-///
-/// One short pulse, not a pattern: a pattern would read as an app being chatty
-/// rather than a result being announced, and the screen already says what
-/// happened.
-fn buzz() {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    window.navigator().vibrate_with_duration(WINNER_BUZZ_MS);
-}
-
-/// How long the winner's buzz lasts, in milliseconds.
-const WINNER_BUZZ_MS: u32 = 40;
 
 /// The winner's ordinal among the players it chose from.
 ///

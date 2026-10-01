@@ -23,6 +23,8 @@
 //!   present and nobody has been chosen yet.
 //! * A finger up (or a cancelled touch) removes that player and restarts the
 //!   timer, for the same reason.
+//! * The timer does not start counting until the last finger has finished
+//!   registering, so nobody is ever picked from a wheel they have not seen.
 //! * Arming a draw also *picks* the winner, at random, there and then. The
 //!   spinning animation in [`crate::wheel`] is laid out to land on it, so the
 //!   result is fixed before anything is drawn and cannot be argued with on the
@@ -238,8 +240,41 @@ impl Chooser {
     /// Exactly the original's `started_timeout`: set when the timer is armed,
     /// cleared the moment it fires -- which is what stops a pointer event
     /// arriving in the same frame as the draw from starting a second one.
+    ///
+    /// True even while players are still registering: the window *is* open, it has
+    /// simply not started counting. See [`Self::ready_at`].
     pub fn is_drawing(&self) -> bool {
         self.draw_started_at.is_some()
+    }
+
+    /// When the draw actually begins counting, if one is open.
+    ///
+    /// A finger's circle charges for [`REGISTRATION_TIME_MS`] after it lands, and
+    /// the draw does not start until the last finger has finished charging. So the
+    /// window opens when the players change and the clock starts a beat later.
+    ///
+    /// Without this, a player who slaps their finger down just as the previous
+    /// window expired would have been picked from a wheel whose other circles were
+    /// still transparent and had not moved into place. The choice would have been
+    /// made from a screen nobody had seen.
+    pub fn ready_at(&self) -> Option<f64> {
+        let started = self.draw_started_at?;
+        // Every finger that is still charging holds the draw back, and the last
+        // one to land decides how long that is.
+        let last_to_land = self
+            .players
+            .values()
+            .map(|player| player.joined_at)
+            .fold(f64::NEG_INFINITY, f64::max);
+        Some(
+            (started + REGISTRATION_TIME_MS).max(last_to_land + REGISTRATION_TIME_MS),
+        )
+    }
+
+    /// Whether the draw has finished waiting for every finger to charge.
+    pub fn is_ready(&self, timestamp: f64) -> bool {
+        self.ready_at()
+            .is_some_and(|ready| timestamp >= ready)
     }
 
     /// How far through registering the player at `index` is, 0 to 1.
@@ -268,7 +303,7 @@ impl Chooser {
     ///
     /// `None` while no draw window is running, which draws no arc at all.
     pub fn draw_progress(&self, timestamp: f64) -> Option<f64> {
-        let started = self.draw_started_at?;
+        let started = self.ready_at()?;
         Some(((timestamp - started) / DRAWING_TIME_MS).clamp(0.0, 1.0))
     }
 
@@ -530,15 +565,81 @@ mod tests {
     }
 
     #[test]
-    fn a_second_finger_starts_the_draw() {
+    fn a_second_finger_opens_the_draw() {
         let mut chooser = Chooser::new();
         chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
         chooser.pointer_down(2, 50.0, 50.0, 40.0, 1);
 
         assert!(chooser.is_drawing());
         assert_eq!(chooser.draw_started_at(), Some(40.0));
-        assert_eq!(chooser.draw_progress(40.0), Some(0.0));
-        assert_eq!(chooser.draw_progress(40.0 + DRAWING_TIME_MS / 2.0), Some(0.5));
+        // But it is not *counting* yet: the last finger landed at 40ms and has
+        // REGISTRATION_TIME_MS of charging to do first.
+        assert!(!chooser.is_ready(40.0));
+        assert_eq!(
+            chooser.ready_at(),
+            Some(40.0 + REGISTRATION_TIME_MS),
+            "the draw starts when the last finger is charged"
+        );
+    }
+
+    #[test]
+    fn the_draw_starts_only_after_every_finger_has_charged() {
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
+        chooser.pointer_down(2, 50.0, 50.0, 40.0, 1);
+
+        let ready = chooser.ready_at().expect("a window");
+        assert!(!chooser.is_ready(ready - 1.0), "not before");
+        assert!(chooser.is_ready(ready), "at the instant every circle is full");
+        assert_eq!(chooser.draw_progress(ready), Some(0.0));
+        assert_eq!(
+            chooser.draw_progress(ready + DRAWING_TIME_MS / 2.0),
+            Some(0.5),
+            "and the window runs from there"
+        );
+    }
+
+    #[test]
+    fn a_late_finger_holds_the_draw_back() {
+        // The case this exists for: someone slaps a finger down as the previous
+        // window was expiring. Their circle is still transparent when the clock
+        // would otherwise have fired, so nobody may be picked from it.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
+        chooser.pointer_down(2, 50.0, 50.0, 0.0, 1);
+        let first_ready = chooser.ready_at().expect("a window");
+        assert!(chooser.is_ready(first_ready));
+
+        // A third finger at the very moment the window was about to fire.
+        chooser.pointer_down(3, 10.0, 10.0, first_ready, 2);
+        assert!(
+            !chooser.is_ready(first_ready),
+            "and it is not ready any more"
+        );
+        let second_ready = chooser.ready_at().expect("a window");
+        assert_eq!(
+            second_ready,
+            first_ready + REGISTRATION_TIME_MS,
+            "pushed back by exactly one registration"
+        );
+        assert!(chooser.is_ready(second_ready));
+    }
+
+    #[test]
+    fn every_finger_gets_its_full_charging_time() {
+        // Two fingers at very different times: the draw waits for the later one,
+        // and the earlier one is not asked to wait twice.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0);
+        chooser.pointer_down(2, 50.0, 50.0, 500.0, 1);
+        assert_eq!(chooser.ready_at(), Some(500.0 + REGISTRATION_TIME_MS));
+        // And an earlier finger is charged long before the draw starts.
+        const {
+            assert!(
+                500.0 > REGISTRATION_TIME_MS,
+                "the first finger finished charging before the second landed"
+            )
+        };
     }
 
     #[test]
@@ -570,8 +671,9 @@ mod tests {
     #[test]
     fn the_arc_clamps_outside_the_window() {
         let chooser = drawing();
-        assert_eq!(chooser.draw_progress(-5_000.0), Some(0.0));
-        assert_eq!(chooser.draw_progress(9_999.0), Some(1.0));
+        let ready = chooser.ready_at().expect("a window");
+        assert_eq!(chooser.draw_progress(ready - 5_000.0), Some(0.0));
+        assert_eq!(chooser.draw_progress(ready + 9_999.0), Some(1.0));
     }
 
     #[test]
@@ -817,6 +919,20 @@ mod tests {
             chooser.chosen_radius(0.0, 10.0, 10.0),
             Some(WINNER_RADIUS)
         );
+    }
+
+    #[test]
+    fn the_winner_keeps_their_position_while_their_finger_moves() {
+        // After a draw the winner is the only player left, and the reveal is the
+        // only thing on screen -- so their circle following their finger is the
+        // only feedback there is. `pointer_move` therefore has to keep working on
+        // the winner alone, which it does because it is an ordinary player update.
+        let mut chooser = armed(1);
+        let winner = chooser.draw(2500.0).expect("a winner");
+        chooser.pointer_move(winner, 300.0, 400.0);
+        let player = chooser.chosen().expect("the winner is still a player");
+        assert_eq!((player.x, player.y), (300.0, 400.0));
+        assert_eq!(chooser.len(), 1, "and still the only one");
     }
 
     #[test]

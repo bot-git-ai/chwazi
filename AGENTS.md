@@ -95,6 +95,7 @@ get "improved", and on this app every one of them is the feel:
 | `DRAWING_TIME_MS` = 2500 | the whole window: spin, then a beat to read it |
 | `wheel::SPIN_FRACTION` = 0.55 | of that window, the spin; the rest is the result |
 | `wheel::GATHER_FRACTION` = 0.34 | of the spin, the circles reaching their slots |
+| `wheel::turns_for(n)` = 2 + n | whole turns, so the pointer lands *on* a segment |
 | `CHOSEN_PLAYER_ANIMATION_TIME_MS` = 1000 | the winner's colour flooding the screen |
 | `RESTART_DELAY` = 2000 | after the winner lifts, before the next draw |
 
@@ -244,6 +245,55 @@ circle, and it is only true if the circle is not the input.
 
 ## Two things that are not about speed
 
+## The wheel has fixed segments and a moving pointer
+
+This is the one piece of design that had to be got right twice.
+
+The first version gave each circle's slot angle the same time term as the pointer,
+so **the dots orbited one another** while the pointer chased them. It looked like a
+carousel, not a spinner, and it was unreadable: the eye has to track a dot relative
+to two other moving things instead of relative to the pointer. `wheel::slots` now
+takes only a *gather* value and no time at all, so a player's segment never moves.
+`the_dots_do_not_rotate_around_each_other` is the regression test.
+
+Removing the rotation exposed a second, worse bug that the orbit had been hiding:
+**a fixed number of turns cannot land on a segment of a wheel whose segment count
+is not known until the last finger is down.** 2.15 turns lands 30% of a segment past
+the mark with two players, 75% past it with five, and 5% *short* of it with seven —
+so the pointer came to rest between two circles. `turns_for(players)` is now
+`BASE_TURNS + players`, a whole number by construction, so the pointer always
+finishes back at the mark slot 0 occupies. One extra turn per player costs about
+200ms at this speed, so a table of ten still spins in under two seconds.
+
+## The two loadings
+
+1. **A finger charging**, over `REGISTRATION_TIME_MS`. Its outer ring fills from
+   transparent to that player's own colour, and the inner disc fades in behind it.
+   The original filled its ring from light to dark; loading *towards the colour the
+   player will be* is the same idea with the destination moved to where it belongs,
+   so the ring is both the progress bar and the first thing drawn in that colour.
+   (There was a white halo here before. A halo is a second, competing mark around
+   the one thing the player is looking at; a ring that fills is the same information
+   without the extra shape.)
+2. **The choice.** The white arc sweeping each ring while the wheel spins.
+
+**The draw does not start until the last finger has finished charging.** Without
+that, a player who slapped a finger down as the previous window expired could be
+picked from a wheel whose other circles were still transparent and had not yet moved
+into place — chosen from a screen nobody had seen. `Chooser::ready_at` is that
+moment, and the pointer, the arc and the draw all measure from it, so they cannot
+disagree about when the draw began.
+
+## The winner follows their finger
+
+After the draw the winner is the only player left, and for the whole reveal it is
+the only thing on screen, so their circle tracking their finger is the only feedback
+there is. `draw_reveal` reads the winner's *live* position rather than the one
+recorded at the draw, and `pointer_move` still updates them, so dragging the finger
+drags the expanding colour with it. Once the finger lifts, the position the winner
+lifted at is kept until the app resets — which is the same rule the original had, and
+the reason the reset is two seconds.
+
 ## What is not on screen
 
 Nothing. The canvas is the whole interface, and that is a decision rather than an
@@ -256,11 +306,10 @@ oversight:
   across the middle of the screen is in the way of the thing the player is looking
   at, and the app is meant to be understood by putting a finger down.
 
-What replaced both is a *load* rather than a message: a new finger's circle now
-draws itself in behind a collapsing white halo over `REGISTRATION_TIME_MS`. That is
-the app's first loading — per finger, at the moment of arrival, and it is how the
-app says *I have you* — and it needed no text to do it. The second loading is the
-choice: the halo is the first, the draw is the second.
+What replaced both is a *load* rather than a message: a new finger's ring fills
+with its colour over `REGISTRATION_TIME_MS`. That is the app's first loading — per
+finger, at the moment of arrival, and it is how the app says *I have you* — and it
+needed no text to do it. The second loading is the choice.
 
 The one line of guidance that remains is the meta description, which the player
 sees in the launcher or a share sheet and never while the app is open.

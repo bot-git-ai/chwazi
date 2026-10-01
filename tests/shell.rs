@@ -603,6 +603,46 @@ fn the_canvas_carries_nothing_but_the_circles() {
     );
 }
 
+/// A release must leave a complete, current `dist/` behind.
+///
+/// This is the invariant that was broken: `cobalt release` runs the host
+/// `cargo build`, which runs `build.rs`, and `build.rs` deliberately does not
+/// invoke the bindings generator. So a release refreshed the six files it owns and
+/// left `app.js` and `app_bg.wasm` at whatever they were -- which after two releases
+/// was a wasm two commits stale, next to a fresh `index.html`. A `dist/` that looks
+/// publishable and is not is worse than no `dist/`, because it is trusted.
+///
+/// The two steps are the ones `AGENTS.md` documents, and the order is the whole
+/// point: the cache version is hashed from the wasm, so the wasm has to be there
+/// first.
+#[test]
+fn the_documented_build_publishes_the_whole_site() {
+    let build = std::fs::read_to_string(root().join("build.rs")).expect("build.rs");
+    // The host build must not claim to have produced the wasm.
+    assert!(
+        build.contains("if target.starts_with(\"wasm\")"),
+        "build.rs must skip the wasm target: at that point the artefacts it would \
+         write are the *output* of the build it is part of"
+    );
+    // And the shell test must know the full list, which is the same eight the
+    // service worker precaches.
+    let worker = worker_assets(&worker());
+    assert_eq!(
+        worker.len(),
+        8,
+        "eight shell files: the worker, the bindings, the wasm, the manifest, the \
+         two icons, the SVG and the page"
+    );
+    let published = published_files();
+    for asset in &worker {
+        let name = if asset == "./" { "index.html" } else { asset };
+        assert!(
+            published.iter().any(|file| file == name),
+            "{name} is precached but not published"
+        );
+    }
+}
+
 /// The manifest is assembled in `build.rs` from constants, so this asserts on
 /// those — the only copy a test can reach, since the built one is gitignored.
 /// What it pins is what the original `manifest.json` chose: the name, the short

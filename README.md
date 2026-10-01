@@ -47,13 +47,13 @@ Each finger down becomes a player, drawn as a filled disc inside a ring, pulsing
 between 0.875× and 1.125× its size, in a colour spread around the hue wheel by
 `hsl(pointerId * 223 + 263, 100%, 40%)`.
 
-Put a finger down and its circle draws itself in behind a white halo that collapses
-onto it — the app telling you it has you. That is the first of its two loadings,
-and it is per finger, at the moment you arrive.
+Put a finger down and its ring fills from transparent to that player's own colour —
+the app telling you it has you. That is the first of its two loadings, and it is
+per finger, at the moment you arrival.
 
 Once two or more are down they gather onto a wheel, a white arc closes around each
-of them, and then the wheel spins: just over two turns, fast at first, easing to a
-stop beside one finger over the first ~1400ms of the 2500ms window. It lands
+of them, and then the wheel spins: the segments hold still and only the pointer moves, fast
+at first, easing to a stop beside one finger over the first ~1400ms of the window. It lands
 *beside* the winner rather than on it, so the circle it points at is never hidden
 behind the pointer. The rest of the window is a landed, readable result. The winner
 is picked the instant the last finger settles, not by the animation, so nothing

@@ -257,8 +257,8 @@ fn render(
         let mut announced = None;
         app.chooser.tick(timestamp);
 
-        let drawing_since = app.chooser.draw_started_at();
-        if let Some(since) = drawing_since {
+        let ready_since = app.chooser.ready_at();
+        if let Some(since) = ready_since {
             if timestamp - since >= chooser::DRAWING_TIME_MS {
                 // The number of players is read before the draw, because the
                 // draw removes all but the winner.
@@ -352,7 +352,7 @@ fn paint(
     // which is the whole of the app's feedback before there is a choice to make.
     if players.len() < chooser::REQUIRED_PLAYER_COUNT {
         for (index, (id, x, y)) in players.iter().enumerate() {
-            let halo = app.registration(index, timestamp).unwrap_or(1.0);
+            let loaded = app.registration(index, timestamp).unwrap_or(1.0);
             let here = Player {
                 id: *id,
                 x: *x,
@@ -360,8 +360,7 @@ fn paint(
                 joined_at: f64::NEG_INFINITY,
                 chosen_at: None,
             };
-            draw_halo(context, &here, halo);
-            draw_player(context, &here, pulse, 0.0);
+            draw_player(context, &here, pulse, 0.0, loaded);
         }
         return;
     }
@@ -371,9 +370,15 @@ fn paint(
     // give the same wheel, which is what lets it stay in step while fingers move
     // underneath it.
     let window = chooser::DRAWING_TIME_MS;
-    let elapsed = timestamp - app.draw_started_at().unwrap_or(timestamp);
+    let elapsed = timestamp - app.ready_at().unwrap_or(timestamp);
+    let gather = wheel::gather_progress(elapsed, window);
+    let slots = wheel::slots(&players, gather, width, height);
+    // `elapsed` is measured from the moment the app is ready, so it is zero while
+    // fingers are still charging and the whole window is spent spinning. That is
+    // the same instant `ready_at` returns, so the pointer, the arc and the draw
+    // cannot disagree about when the draw began.
     let spin = wheel::spin_progress(elapsed, window);
-    let slots = wheel::slots(&players, spin, width, height);
+    let turns = wheel::turns_for(players.len());
     let arc = app.draw_progress(timestamp).unwrap_or(0.0);
 
     // Faint spokes first, so the circles sit on something. This is the one piece
@@ -383,7 +388,7 @@ fn paint(
 
     for (index, (id, _, _)) in players.iter().enumerate() {
         let slot = slots[index];
-        let halo = app.registration(index, timestamp).unwrap_or(1.0);
+        let loaded = app.registration(index, timestamp).unwrap_or(1.0);
         let landing = app.pending_winner() == Some(index);
         let here = Player {
             id: *id,
@@ -392,7 +397,6 @@ fn paint(
             joined_at: f64::NEG_INFINITY,
             chosen_at: None,
         };
-        draw_halo(context, &here, halo);
         draw_player(
             context,
             &here,
@@ -400,10 +404,18 @@ fn paint(
             // the eye is pulled to the right place before the result is announced.
             pulse * if landing { landing_grow(spin) } else { 1.0 },
             arc,
+            loaded,
         );
     }
 
-    draw_pointer(context, &players, &slots, elapsed, window, width, height);
+    draw_pointer(
+        context,
+        &players,
+        &slots,
+        elapsed,
+        window,
+        &View { width, height, turns },
+    );
 }
 
 /// The winner's colour taking the screen, with the winner as a hole in it.
@@ -418,12 +430,18 @@ fn draw_reveal(
 ) {
     let progress = app
         .chosen_progress(timestamp)
-        .or_else(|| {
-            Some(
-                ((timestamp - winner.at) / chooser::CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0),
-            )
-        })
-        .unwrap_or(1.0);
+        .unwrap_or_else(|| {
+            ((timestamp - winner.at) / chooser::CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0)
+        });
+
+    // The winner's finger, if it is still down. The chooser keeps only the winner
+    // after a draw, and its `pointer_move` still updates that player, so the live
+    // position is one lookup -- and the whole reveal follows it.
+    let live = app
+        .chosen()
+        .filter(|player| player.id == winner.id)
+        .map_or((winner.x, winner.y), |player| (player.x, player.y));
+    let (cx, cy) = live;
     // The same radius curve as the original: from off-screen down to just
     // clearing the winner's own ring.
     let from = width.max(height).max(chooser::WINNER_RADIUS);
@@ -432,7 +450,7 @@ fn draw_reveal(
     match web_sys::Path2d::new() {
         Ok(path) => {
             path.rect(0.0, 0.0, width, height);
-            if path.arc(winner.x, winner.y, radius, 0.0, TWO_PI).is_ok() {
+            if path.arc(cx, cy, radius, 0.0, TWO_PI).is_ok() {
                 context.set_fill_style_str(&Player::color(winner.id));
                 context.fill_with_path_2d_and_winding(&path, web_sys::CanvasWindingRule::Evenodd);
             }
@@ -441,19 +459,18 @@ fn draw_reveal(
     }
     // The winner alone, at full pulse, and never a loading arc: the draw is over,
     // and an arc sweeping its ring would read as a second, still-running draw.
+    // The winner's circle follows their finger for the whole reveal. `winner` was
+    // recorded at the draw, and this is the same pointer id, so if that finger is
+    // still down its live position wins: the colour expands from wherever the
+    // winner's finger actually is, and drags with it.
     let here = Player {
         id: winner.id,
-        x: winner.x,
-        y: winner.y,
+        x: cx,
+        y: cy,
         joined_at: f64::NEG_INFINITY,
         chosen_at: None,
     };
-    draw_player(
-        context,
-        &here,
-        pulse,
-        1.0,
-    );
+    draw_player(context, &here, pulse, 1.0, 1.0);
 }
 
 /// How much larger the landing player's circle is at the end of the spin.
@@ -501,20 +518,26 @@ fn draw_spokes(
 /// A single small white dot riding the ring, which is all it needs to be: the
 /// wheel's own rotation is the spectacle, and a pointer that drew attention to
 /// itself would compete with the landing.
+/// The screen's size, in CSS pixels, with the wheel's turn count.
+struct View {
+    width: f64,
+    height: f64,
+    turns: f64,
+}
+
 fn draw_pointer(
     context: &web_sys::CanvasRenderingContext2d,
     players: &[(i32, f64, f64)],
     slots: &[wheel::Slot],
     elapsed: f64,
     window: f64,
-    width: f64,
-    height: f64,
+    view: &View,
 ) {
-    let Some(landed) = wheel::landed_on(slots, elapsed, window) else {
+    let Some(landed) = wheel::landed_on(slots, elapsed, window, view.turns) else {
         return;
     };
     let colour = Player::color(players[landed].0);
-    let (px, py) = wheel::pointer_position(elapsed, window, width, height);
+    let (px, py) = wheel::pointer_position(elapsed, window, view.turns, view.width, view.height);
 
     // The landing player's colour as a halo, so the dot is legible over a circle
     // of the same colour and does not vanish into it.
@@ -538,45 +561,22 @@ fn draw_pointer(
     context.stroke()
 }
 
-/// The registration halo: the app's first loading, and the only feedback a player
-/// gets before there is a choice.
-///
-/// A white ring collapses onto a newly-landed circle and vanishes, so putting a
-/// finger down is an event rather than something that merely happens to be there.
-/// It fades as it closes rather than shrinking all the way, which keeps the last
-/// few frames from a thin bright line flickering at the circle's edge.
-///
-/// `progress` is [`chooser::registration`]: 0 as the finger lands, 1 when the
-/// circle has arrived. Past 1 nothing is drawn at all, so a circle that has
-/// settled costs nothing per frame.
-fn draw_halo(context: &web_sys::CanvasRenderingContext2d, player: &Player, progress: f64) {
-    if progress >= 1.0 {
-        return;
-    }
-    let start = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * chooser::HALO_SCALE;
-    let end = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * 1.35;
-    let eased = 1.0 - (1.0 - progress).powi(2);
-    let radius = end + (start - end) * eased;
-    // Full strength at the start, gone by the end: the halo announces the arrival
-    // and gets out of the way.
-    let alpha = 0.85 * (1.0 - progress);
-
-    context.begin_path();
-    if context.arc(player.x, player.y, radius, 0.0, TWO_PI).is_err() {
-        return;
-    }
-    context.set_line_width(2.5);
-    context.set_stroke_style_str(&format!("rgba(255, 255, 255, {alpha:.3})"));
-    context.stroke();
-}
-
 /// One player: a filled inner disc, a ring around it, and the white arc that
 /// counts the draw down.
+/// `loaded` is the first of the app's two loadings: how far this circle's ring
+/// has filled, 0 at the moment the finger lands and 1 when it is fully charged.
+///
+/// The ring fills with the player's own colour rather than a white halo. The
+/// original filled the ring from light to dark; loading *towards the colour the
+/// player will be* is the same idea with the destination moved to where it
+/// belongs, so the ring is both the progress indicator and the first thing drawn
+/// in that player's colour.
 fn draw_player(
     context: &web_sys::CanvasRenderingContext2d,
     player: &Player,
     pulse: f64,
     loading: f64,
+    loaded: f64,
 ) {
     let colour = player.color_of();
     let ring_radius = (chooser::INNER_RADIUS + chooser::OUTER_RADIUS) * pulse;
@@ -597,14 +597,26 @@ fn draw_player(
         show_failure(&describe(&error));
         return;
     }
+    // The disc fades in over the second half of the registration: the ring is the
+    // thing that loads, and the disc arrives as the ring fills.
+    context.set_global_alpha((loaded * loaded).clamp(0.0, 1.0));
     context.set_fill_style_str(&colour);
     context.fill();
+    context.set_global_alpha(1.0);
 
+    // The ring, loading: transparent at the moment the finger lands, the player's
+    // own colour when it is charged. `globalAlpha` rather than a colour function
+    // so the alpha composites with whatever is behind the canvas instead of being
+    // baked into one string.
+    context.save();
+    context.set_global_alpha(loaded.clamp(0.0, 1.0));
     context.begin_path();
-    let _ = context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI);
-    context.set_line_width(ring_width);
-    context.set_stroke_style_str(&colour);
-    context.stroke();
+    if context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI).is_ok() {
+        context.set_line_width(ring_width);
+        context.set_stroke_style_str(&colour);
+        context.stroke();
+    }
+    context.restore();
 
     // The arc spans from `2*PI*(1-loading)/2` to `2*PI*(1-loading)*3/2`: a gap of
     // a quarter turn at the start of the window, closing to nothing by the end,

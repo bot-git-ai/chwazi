@@ -1513,6 +1513,62 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_player_stays_chosen_and_keeps_its_ring_loaded() {
+        // The winner's ring filled up with the player's colour over the draw window
+        // and has to stay that way.
+        //
+        // `draw_progress` returns `None` both before a window opens and after one
+        // ends, so the draw's own progress cannot distinguish "waiting" from
+        // "won" -- and the drawing code fell through to the resting tint for both, so
+        // the winner's ring dimmed the instant the window closed. The charge visibly
+        // discharged, which is the opposite of what being chosen should look like.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 0.0);
+        let ready = chooser.ready_at().expect("a window");
+        assert!(!chooser.is_chosen(), "nobody has won yet");
+
+        let winner = chooser.draw(ready + DRAWING_TIME_MS, 0).expect("a winner");
+
+        // The window is over, so the draw no longer has a progress to report...
+        assert!(
+            chooser
+                .draw_progress(ready + DRAWING_TIME_MS + 1.0)
+                .is_none(),
+            "and there is no draw progress left to draw with"
+        );
+        // ...but the choice stands, so the rendering has something to key off.
+        assert!(
+            chooser.is_chosen(),
+            "the choice outlives the draw window, so the winner's ring can hold"
+        );
+        assert_eq!(chooser.chosen().map(|p| p.id), Some(winner));
+
+        // And it holds for as long as the winner's finger is down, which is until
+        // the reset -- the reset is timed from the winner lifting, not from the draw.
+        for later in [1.0_f64, 500.0, 1_900.0] {
+            assert!(
+                chooser.is_chosen(),
+                "and is still the choice {later}ms after the draw ended"
+            );
+        }
+        assert!(
+            !chooser.tick(ready + DRAWING_TIME_MS + RESTART_DELAY),
+            "holding the finger down holds the choice, however long that is"
+        );
+        // Lift it, and the reset is two seconds from *that*.
+        chooser.pointer_up(winner, ready + DRAWING_TIME_MS + 1.0);
+        assert!(
+            !chooser.tick(ready + DRAWING_TIME_MS + 1.0 + RESTART_DELAY - 1.0),
+            "not a millisecond early"
+        );
+        assert!(
+            chooser.tick(ready + DRAWING_TIME_MS + 1.0 + RESTART_DELAY),
+            "and the app resets two seconds after the winner lifts"
+        );
+    }
+
+    #[test]
     fn the_draw_waits_for_every_finger_to_load() {
         // Without this, a finger that lands just as the previous window was
         // expiring is picked from a mark still charging, from a screen whose other

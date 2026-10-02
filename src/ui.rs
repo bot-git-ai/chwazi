@@ -290,7 +290,7 @@ fn paint(
         // The winner alone, at full pulse, and never a loading arc: the draw is
         // over, and an arc sweeping its ring would read as a second, still-running
         // draw. It has already loaded, so it is drawn loaded.
-        draw_player(context, winner, pulse, None, None);
+        draw_player(context, winner, pulse, None, None, true);
         return;
     }
 
@@ -308,7 +308,7 @@ fn paint(
         // The arc is not eased at all. Measured, the sweep is linear, and easing it
         // too would be inventing a curve the samples do not show.
         let loading = player.registration(timestamp);
-        draw_player(context, player, pulse, loading, progress);
+        draw_player(context, player, pulse, loading, progress, false);
     }
 }
 
@@ -333,6 +333,10 @@ fn draw_player(
     // is running. They are two separate numbers, deliberately: see `draw_player`.
     loading: Option<f64>,
     draw: Option<f64>,
+    // Whether this player has been chosen. It is what makes the winner's ring keep
+    // the colour the draw covered it in, since `draw` is `None` both before a draw
+    // opens and after one ends and cannot tell those two apart on its own.
+    app_is_chosen: bool,
 ) {
     let colour = player.color_of();
     // The whole mark breathes in the pulse.
@@ -425,7 +429,22 @@ fn draw_player(
         return;
     }
 
-    // Loaded and no draw running: the ring at rest.
+    // Loaded, and no draw running.
+    //
+    // The winner's ring keeps the colour the draw covered it in. `draw` is `None`
+    // both *before* a draw opens and *after* it ends, so this branch serves two very
+    // different moments, and they must not look the same: a player waiting for the
+    // draw is still loading their ring, and a player who has won has a ring that
+    // filled up with their colour and stays that way.
+    //
+    // It used to fall through to the resting tint either way, so the winner's ring
+    // dimmed the instant the window closed -- the charge visibly discharging,
+    // which is the opposite of what being chosen should look like.
+    if app_is_chosen {
+        draw_ring(0.0, TWO_PI, &colour);
+        return;
+    }
+
     draw_ring(0.0, TWO_PI, &ring);
 }
 

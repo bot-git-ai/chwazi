@@ -803,6 +803,37 @@ fn the_two_loadings_are_different_gestures() {
         flat.contains("&loaded") && flat.contains("&ring") && flat.contains("&colour"),
         "three distinct colours: the loading tint, the resting ring, and the fill"
     );
+
+    // The winner's ring keeps the colour the draw covered it in.
+    //
+    // `draw` is `None` before a window opens *and* after one ends, so the winner
+    // and a merely-loaded player reach the same branch with the same arguments. They
+    // must not be drawn the same: the winner's ring held the resting tint for a
+    // moment after the window closed, so the charge visibly discharged.
+    assert!(
+        code.contains("app_is_chosen: bool"),
+        "the drawing needs to know whether this player was chosen, or it cannot \
+         tell a winner from a player who is merely waiting"
+    );
+    assert!(
+        flat.contains("ifapp_is_chosen{draw_ring(0.0,TWO_PI,&colour);"),
+        "a chosen player's ring must be drawn in the full colour, not the resting \
+         tint -- the draw covers it in and it keeps that"
+    );
+    // And the resting tint is still there for everyone else, so this is not simply
+    // "everybody is bright". Scoped to the last stroke in the function: the draw
+    // branch also draws the resting ring, underneath the colour that covers it, so
+    // a check anywhere in the function is satisfied by the wrong line.
+    let last_stroke = code
+        .rsplit("draw_ring(")
+        .next()
+        .expect("the last draw_ring call")
+        .to_owned();
+    assert!(
+        last_stroke.contains("&ring)"),
+        "a player who has not won still rests at the dim tint, as the last stroke: \
+         {last_stroke}"
+    );
 }
 
 /// The start screen is bare.

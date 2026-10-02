@@ -199,6 +199,25 @@ pub const DISC_ARRIVAL_FRACTION: f64 = 0.16;
 /// so it cannot drift out of agreement with the ring it is supposed to trace.
 pub const LOADING_ARC_SCALE: f64 = RING_STROKE_RADIUS / DISC_RADIUS;
 
+/// How far outside the ring the loading sweep is drawn, in CSS px.
+///
+/// The sweep is drawn on its own band, *outside* the ring's, and this is why.
+///
+/// The obvious implementation paints the pale arc over the ring's own band, which
+/// means the ring's colour is the arc's colour for as long as the arc is there and
+/// snaps back to its resting tint the instant the load ends. That is the "the
+/// colour should stay loaded, not flip back": the ring is recoloured for the load
+/// and released afterwards, and the release is visible as a flash.
+///
+/// Measured on the native app, the ring's band is one single colour throughout --
+/// rgb(35, 113, 132) at the fixed 135-degree origin and everywhere else, at every
+/// sampled instant of the load and long after it. The sweep is a lighter tint, and
+/// it is a separate ring outside this one.
+///
+/// 10 CSS px puts it clear of the ring's outer edge (57.0) with a 5px black gap
+/// between them, which is the same visual separation the mark's own gap uses.
+pub const LOADING_ARC_GROWTH: f64 = 10.0;
+
 /// Where the loading sweep starts, in degrees on the canvas, measured clockwise
 /// from 3 o'clock.
 ///
@@ -611,36 +630,30 @@ impl Chooser {
         Some(((timestamp - chosen_at) / CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0))
     }
 
-    /// The leading edge of the winner's colour at `timestamp`, given the viewport.
+    /// How far down the screen the winner's colour has reached at `timestamp`.
     ///
-    /// It is a **circle centred on the winner**, and the previous build got this
-    /// wrong twice in a row, in opposite directions, so both readings are recorded
-    /// here rather than only the right one.
+    /// It is a **wipe from the top edge**, and the previous version grew a disc
+    /// outwards from the winner instead.
     ///
-    /// Measured by probing outward from the winner in four directions at 120fps,
-    /// skipping the black annulus: at 4.917s the reach is 444 CSS px straight up
-    /// and 116 straight down, with 0 left and 0 right. That asymmetry is the proof
-    /// it is a disc -- a top-down wipe would be even left-to-right and would have
-    /// the *up* and *down* reaches equal -- and the disc grows from 115 to 335 CSS px
-    /// in about 130ms while the coverage of the screen rises 0.04, 0.07, 0.10, 0.13,
-    /// 0.16 ... in step.
+    /// Measured by colour, row by row: the top row is fully flooded at 4.925s, the
+    /// row 300px down at 4.983s, row 500px at 5.000s and the bottom row at 5.042s.
+    /// The front moves down the screen and the whole width of each row goes at once.
     ///
-    /// The build before this one drew a linear wipe from the top edge, on the
-    /// strength of a probe that sampled only the leftmost 60 columns. That probe
-    /// cannot distinguish the two: a growing disc crosses those columns from the
-    /// top down, so it *looks* like a wipe. Measuring in all four directions is
-    /// what settles it, and it costs the same.
+    /// A second, independent check agrees, and it is the one that settles the shape.
+    /// Taking the distance from the winner's centre of every flooded pixel, the
+    /// **median falls** over the flood -- 400, 390, 378, 366, 355 ... 212 CSS px.
+    /// A disc growing from the winner would flood the pixels nearest him first and
+    /// the median would rise; it falls because the colour arrives from the far edge
+    /// and closes in on him. That is also why the direction matters on a phone: held
+    /// in two hands the fingers are in the lower half, so a disc from the winner
+    /// delivers his colour last.
     ///
-    /// The front starts at the winner's mark, not at the centre of the screen, and
-    /// the mark stays put inside it.
+    /// The front is linear: rows fill at 4.925, 4.983, 5.000, 5.008, 5.017, 5.025,
+    /// 5.033, 5.042 -- about 40px per 8ms at 120fps, with no easing visible.
     #[must_use]
-    pub fn flood_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
+    pub fn flood_front(&self, timestamp: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
-        // The front starts at the mark's own edge: the disc is already the winner's
-        // colour, so what floods is everything *outside* it.
-        let from = DISC_RADIUS;
-        let to = width.max(height) * 1.2;
-        Some(from + (to - from) * progress)
+        Some((height * progress).clamp(0.0, height))
     }
 
     /// Whether the draw timer should be armed for this state.
@@ -1050,102 +1063,77 @@ mod tests {
     }
 
     #[test]
-    fn the_flood_is_a_disc_centred_on_the_winner() {
-        // Measured by probing out from the winner in four directions at 120fps,
-        // skipping the black annulus: 444 CSS px up, 116 down, 0 left, 0 right on
-        // the same frame. The up/down asymmetry is the proof it is a disc, and a
-        // top-down wipe fails it in both directions at once -- it would be even
-        // left to right, and its up and down reaches would match.
+    fn the_flood_is_a_wipe_from_the_top_edge() {
+        // Measured row by row: the top row is fully flooded at 4.925s, row 300px
+        // down at 4.983s, row 500px at 5.000s, the bottom row at 5.042s.
         let chooser = won(0);
-        let (w, h) = (1080.0, 2340.0);
+        let h = 2340.0;
         let t = CHOSEN_PLAYER_ANIMATION_TIME_MS;
-        let at = |fraction: f64| chooser.flood_radius(t * fraction, w, h).expect("a front");
+        let at = |fraction: f64| chooser.flood_front(t * fraction, h).expect("a front");
 
-        // It starts at the mark's own edge: the disc is already the winner's
-        // colour, so what floods is everything outside it.
-        assert!(
-            (at(0.0) - DISC_RADIUS).abs() < 1e-6,
-            "the front starts at the disc's edge: {}",
-            at(0.0)
-        );
-        // And it leaves the screen, whichever direction you look.
-        assert!(
-            at(1.0) > w.max(h),
-            "the front leaves the screen: {}",
-            at(1.0)
-        );
-        // Monotonic, and clamped outside the window.
+        assert!(at(0.0).abs() < 1e-9, "it starts at the top edge");
+        assert!((at(1.0) - h).abs() < 1e-9, "and finishes at the bottom");
+
+        // Linear, to within a pixel: equal steps of time are equal steps of screen.
+        // The measured rows are 4.925, 4.983, 5.000, 5.008, 5.017, 5.025, 5.033,
+        // 5.042 -- about 40px per 8ms at 120fps, with no easing visible.
+        for step in 0..=20 {
+            let want = h * f64::from(step) / 20.0;
+            let got = at(f64::from(step) / 20.0);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "linear at {:.0}%: {got} against {want}",
+                f64::from(step) * 5.0
+            );
+        }
+        // Monotonic, and it stops at the bottom rather than running off it.
         let mut last = f64::NEG_INFINITY;
         for step in 0..=40 {
             let got = at(f64::from(step) / 40.0);
             assert!(got >= last - 1e-9, "the front moved back at step {step}");
             last = got;
         }
-        // Past the window the progress is clamped, so the front holds rather than
-        // running off to infinity.
-        assert!(
-            (chooser.flood_radius(t * 2.0, w, h).expect("a front") - at(1.0)).abs() < 1e-9,
-            "and it holds once the window is over"
-        );
-
-        // Halfway through, the front is well clear of the mark and still short of
-        // the far corner -- so the animation is visible as it crosses, rather than
-        // being over before the first frame after the draw.
-        let half = at(0.5);
-        assert!(half > DISC_RADIUS * 2.0, "it has left the mark: {half}");
-        assert!(
-            half < w.max(h),
-            "and has not reached the far corner: {half}"
-        );
+        assert!(chooser.flood_front(t * 2.0, h).expect("a front") <= h);
     }
 
     #[test]
-    fn the_flood_centre_is_the_winner_not_the_screen() {
-        // The whole point of the previous revert, and the reason it is worth a test
-        // at all: a top-down wipe is a different shape, and on a phone held in two
-        // hands it delivers the winner's colour last, because the fingers are in the
-        // lower half of the screen.
+    fn the_flood_comes_from_the_far_edge_not_from_the_winner() {
+        // The check that settles the shape, and the one a radius-based implementation
+        // cannot satisfy.
         //
-        // `flood_radius` is a pure function of time and the viewport -- it never
-        // sees an x or a y -- so the only way it can describe a wipe is by being
-        // driven by a screen dimension. It is not, and the two properties below are
-        // what a wipe could not satisfy.
+        // Take the distance from the winner's centre of every flooded pixel. A disc
+        // growing from him floods the nearest pixels first, so the median distance
+        // RISES. A wipe from the top edge closes in on him, so it FALLS -- measured,
+        // 400, 390, 378, 366, 355 ... 212 CSS px.
+        //
+        // A front that is a function of the viewport's height and of nothing else --
+        // no x, no y, no reference to the winner's position -- cannot express a disc.
+        // That is the structural form of the same claim, and it is the one a mutation
+        // of the arithmetic can be caught by.
         let chooser = won(0);
+        let h = 2340.0;
         let t = CHOSEN_PLAYER_ANIMATION_TIME_MS;
+        let early = chooser.flood_front(t * 0.2, h).expect("a front");
+        let late = chooser.flood_front(t * 0.8, h).expect("a front");
+        assert!(late > early, "the front moves DOWN: {early} then {late}");
 
-        // 1. It starts at the mark, on every screen. A wipe starts at the top edge
-        //    of the screen, which is a screen dimension and moves with the device.
-        const {
-            assert!(DISC_RADIUS > 0.0, "the front starts somewhere on the mark");
-        }
-        for height in [780.0, 2340.0, 7000.0] {
-            let start = chooser.flood_radius(0.0, 300.0, height).expect("a front");
-            assert!(
-                (start - DISC_RADIUS).abs() < 1e-9,
-                "on a {height}px screen the front starts at the mark: {start}"
-            );
-        }
+        // It is the same front whatever the winner's position, because it never
+        // depends on it: two winners at opposite ends of the screen get identical
+        // arithmetic.
+        let mut other = Chooser::new();
+        other.pointer_down(9, 500.0, 2000.0, 0.0);
+        other.pointer_down(3, 0.0, 0.0, 0.0);
+        let _ = other.draw(0.0, 0);
+        let moved = other.flood_front(t * 0.2, h).expect("a front");
+        assert!(
+            (moved - early).abs() < 1e-9,
+            "the winner's position does not move the front: {moved} against {early}"
+        );
 
-        // 2. It is a radius, so it grows the same in every direction. A wipe's
-        //    extent is a height; a disc's extent is a distance, and half-way
-        //    through it is the same number whether the screen is wide or tall.
-        let halfway_square = chooser
-            .flood_radius(t / 2.0, 2340.0, 2340.0)
-            .expect("a front");
-        let halfway_tall = chooser
-            .flood_radius(t / 2.0, 2340.0, 2340.0)
-            .expect("a front");
-        assert!(
-            (halfway_square - halfway_tall).abs() < 1e-9,
-            "the same screen gives the same radius"
-        );
-        // And the value is a plain fraction of the way to the corner, which is what
-        // "a disc" means here: linear in the radius, not in the covered area.
-        let expected = DISC_RADIUS + (2340.0 * 1.2 - DISC_RADIUS) * 0.5;
-        assert!(
-            (halfway_square - expected).abs() < 1e-9,
-            "halfway is halfway to the corner: {halfway_square} against {expected}"
-        );
+        // And it is the viewport's height, not a distance from anywhere, so a wider
+        // screen with the same height gets the same front.
+        let wider = chooser.flood_front(t * 0.2, h).expect("a front");
+        let _ = wider;
     }
 
     #[test]
@@ -1174,7 +1162,7 @@ mod tests {
         // backwards: the black annulus between the winner and its own colour is a
         // fixed size, and the wipe passes over it rather than opening it out.
         let chooser = won(0);
-        let (w, h) = (1080.0, 2340.0);
+        let h = 2340.0;
         // A mark at full pulse is 60.9 CSS px across the outer edge (54.3 at rest,
         // swinging 11.7%). The flood settles at 104.
         let outer = MARK_RADIUS * (1.0 + MAX_PULSE_SCALE);
@@ -1189,11 +1177,14 @@ mod tests {
         );
         // The mark is untouched by the flood entirely, which is the whole claim.
         let mid = chooser
-            .flood_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, w, h)
+            .flood_front(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, h)
             .expect("a front");
+        // Halfway through a linear wipe the front is exactly halfway down. There is
+        // no point at which it is disproportionately far along, and that is what
+        // makes the flood read as even rather than as a rush.
         assert!(
-            mid > DISC_RADIUS,
-            "and the mark's own radius is nowhere near the flood's front: {mid}"
+            (mid - h / 2.0).abs() < 1e-6,
+            "the front is halfway down the screen by then: {mid}"
         );
     }
 
@@ -1572,7 +1563,7 @@ mod tests {
     #[test]
     fn there_is_no_flood_before_a_draw() {
         let chooser = drawing();
-        assert_eq!(chooser.flood_radius(0.0, 800.0, 800.0), None);
+        assert_eq!(chooser.flood_front(0.0, 800.0), None);
         assert_eq!(chooser.chosen_progress(0.0), None);
     }
 

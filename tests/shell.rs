@@ -38,32 +38,6 @@ fn worker() -> String {
         .expect("the committed worker template")
 }
 
-/// The radius argument of every `.arc(` call in `source`.
-///
-/// Multi-line calls are handled, so this does not care how a call is formatted, and
-/// it returns the third argument -- the radius, after the centre pair.
-///
-/// Written as a parser rather than a line filter because a line filter cannot tell
-/// the radius from the x-coordinate, and it did not: it reported `player.x,` as the
-/// radius. A test that inspects the wrong argument is worse than no test, because
-/// it is the kind that passes.
-fn arc_radii(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = source;
-    while let Some(at) = rest.find(".arc(") {
-        let after = &rest[at + ".arc(".len()..];
-        let Some(end) = after.find(')') else {
-            break;
-        };
-        let args: Vec<&str> = after[..end].split(',').map(str::trim).collect();
-        if let Some(radius) = args.get(2) {
-            out.push((*radius).to_string());
-        }
-        rest = &after[end..];
-    }
-    out
-}
-
 /// Rust source with every comment removed, for substring assertions.
 ///
 /// A test that asserts on source text is asserting on the wrong thing if it can be
@@ -792,7 +766,19 @@ fn the_mark_colours_are_measured() {
 }
 
 #[test]
-fn every_loading_arc_is_drawn_on_the_rings_own_radius() {
+fn both_loading_sweeps_are_drawn_on_their_own_band_outside_the_ring() {
+    // The two loading sweeps are drawn on one band of their own, outside the ring's,
+    // and the ring keeps its own colour underneath them for the whole animation.
+    //
+    // The previous build painted the pale sweep straight over the ring's band, so
+    // the ring was the sweep's colour while the load ran and snapped back to its
+    // resting tint the moment it ended. That flash is "the colour should stay
+    // loaded, not flip back" -- the ring was being recoloured and then released,
+    // rather than the sweep being a separate thing that arrives.
+    //
+    // Measured on the native app: the ring's band is one single colour throughout,
+    // rgb(35, 113, 132) at the fixed 135-degree origin and everywhere else, at
+    // every sampled instant of the load and long after it.
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
     let draw = ui
         .split("fn draw_player(")
@@ -803,59 +789,35 @@ fn every_loading_arc_is_drawn_on_the_rings_own_radius() {
         .expect("the end of the function");
     let code = strip_rust_comments(draw);
 
-    // Every arc drawn for a loading must be at the ring's own radius, exactly.
-    //
-    // The selection arc was once offset by 2px so the two loadings could not share
-    // pixels. That trades a shared circle for a visibly misaligned second ring, and
-    // the two never coexist anyway: the registration ends before the draw opens,
-    // because the draw does not count until every mark has arrived. An earlier
-    // version of this assertion only looked for the constant's name, so an offset
-    // written as a literal `+ 2.0` passed it -- a test that could not fail.
-    //
-    // So this reads the radius out of every `.arc(` call, whatever the formatting,
-    // and requires each to be the ring's own radius.
-    // The disc is the one arc that is *not* at the ring's radius; everything drawn
-    // as part of the ring -- the track, the registration sweep, the selection fill --
-    // must be.
-    let mut arcs = arc_radii(&code).into_iter();
-    assert!(
-        arcs.any(|r| r.contains("DISC_RADIUS")),
-        "the disc is still drawn at its own radius"
+    // Both sweeps are on the same radius, and it is derived from the ring's radius
+    // rather than being a second number that could drift away from it.
+    let grown = code
+        .matches("ring_radius + chooser::LOADING_ARC_GROWTH * scale")
+        .count();
+    assert_eq!(
+        grown, 2,
+        "the registration and the selection sweep share one band, outside the ring: \
+         found {grown}"
     );
-    let ring_arcs: Vec<String> = arcs.collect();
-    assert!(
-        ring_arcs.len() >= 3,
-        "the ring's track and both loadings are all arcs; found {}: {ring_arcs:?}",
-        ring_arcs.len()
-    );
-    for arg in &ring_arcs {
-        assert_eq!(
-            *arg, "ring_radius",
-            "every arc on the ring must be at the ring's own radius, not `{arg}` \
-             -- an offset circle is a visibly misaligned ring"
-        );
-    }
     assert!(
         !code.contains("LOADING_GROWTH"),
-        "and there should be no offset constant for them at all"
+        "and there is no per-sweep offset constant: they are the same band"
     );
 
-    // The per-finger loading is passed in as a fraction, so the mark grows into
-    // place rather than appearing at full size or snapping in.
-    assert!(
-        code.contains("if let Some(loading) = loading"),
-        "the per-finger loading must reach the drawing code as a fraction"
+    // The ring is painted in its own tint and never in a sweep's, so nothing can
+    // recolour it and then give the colour back.
+    assert_eq!(
+        code.matches("let ring = player.ring_color();").count(),
+        1,
+        "the ring is drawn once, in its own tint"
     );
-    // `paint` reads it off the player, not off a flag: the fraction belongs to the
-    // finger, so each mark charges from its own touchdown.
-    assert!(
-        ui.contains(".registration(timestamp)"),
-        "and it must come from the player's own registration, in paint"
-    );
-    assert!(
-        ui.contains("flood_radius"),
-        "the flood must be a disc growing from the winner's own mark"
-    );
+    for sweep in ["player.loading_color()", "set_stroke_style_str(&colour)"] {
+        let uses = code.matches(sweep).count();
+        assert!(
+            uses >= 1,
+            "and the sweeps use their own colours, {sweep}, found {uses}"
+        );
+    }
 }
 
 /// The start screen is bare.

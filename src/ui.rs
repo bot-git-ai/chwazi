@@ -110,7 +110,7 @@ fn run() -> Result<(), JsValue> {
             let event: web_sys::PointerEvent = event.dyn_into()?;
             let (id, x, y) = at(&event);
             let count = borrow(&app, |app| {
-                app.chooser.pointer_down(id, x, y, now());
+                app.chooser.pointer_down(id, x, y, now(), random_angle());
                 app.chooser.len()
             });
             announce_players(count);
@@ -227,7 +227,10 @@ fn render(
                 // The number of players is read before the draw, because the
                 // draw removes all but the winner.
                 let of = app.chooser.len();
-                if let Some(winner) = app.chooser.draw(timestamp, random_index(of)) {
+                if let Some(winner) = app
+                    .chooser
+                    .draw(timestamp, random_index(of), random_angle())
+                {
                     announced = Some((winner, of));
                 }
             }
@@ -290,7 +293,7 @@ fn paint(
         // The winner alone, at full pulse, and never a loading arc: the draw is
         // over, and an arc sweeping its ring would read as a second, still-running
         // draw. It has already loaded, so it is drawn loaded.
-        draw_player(context, winner, pulse, None, None, true);
+        draw_player(context, winner, pulse, None, None, true, app.draw_origin());
         return;
     }
 
@@ -308,7 +311,15 @@ fn paint(
         // The arc is not eased at all. Measured, the sweep is linear, and easing it
         // too would be inventing a curve the samples do not show.
         let loading = player.registration(timestamp);
-        draw_player(context, player, pulse, loading, progress, false);
+        draw_player(
+            context,
+            player,
+            pulse,
+            loading,
+            progress,
+            false,
+            app.draw_origin(),
+        );
     }
 }
 
@@ -337,12 +348,23 @@ fn draw_player(
     // the colour the draw covered it in, since `draw` is `None` both before a draw
     // opens and after one ends and cannot tell those two apart on its own.
     app_is_chosen: bool,
+    // Where the draw's own sweep starts, random per draw. A per-player parameter
+    // would be wrong here: the window is one event, so every mark filling in from
+    // its own start at the same moment would look like four unrelated progress bars
+    // rather than one draw counting down.
+    app_draw_origin: f64,
 ) {
     let colour = player.color_of();
     // The whole mark breathes in the pulse.
     let scale = pulse;
-    // Both loadings sweep from here, and grow towards it, so the tail stays put.
-    let origin = chooser::LOADING_ARC_START.to_radians();
+    // Each loading picks its own point on the ring to start from, and the sweep
+    // closes from both sides of it, finishing opposite.
+    //
+    // The origin is per mark, drawn from the CSPRNG when the finger landed, so a
+    // table of people putting fingers down together get a different answer each
+    // time rather than every ring filling in lockstep from 7:30.
+    let load_origin = player.load_origin;
+    let draw_origin = app_draw_origin;
 
     // The disc, and the disc alone, is what a finger puts on the glass.
     //
@@ -411,7 +433,9 @@ fn draw_player(
         // thing that changes when the load ends is the ring settling from the
         // loading tint to its resting one -- and it settles in the same place, so
         // nothing can appear to vanish.
-        draw_ring(origin - TWO_PI * t, origin, &loaded);
+        for (from, to) in chooser::sweep_arcs(load_origin, t) {
+            draw_ring(from, to, &loaded);
+        }
         return;
     }
 
@@ -425,7 +449,9 @@ fn draw_player(
         // at full strength. The covered part keeps the ring's own tint underneath,
         // so the difference between the two is a colour, not a length.
         draw_ring(0.0, TWO_PI, &ring);
-        draw_ring(origin - TWO_PI * t, origin, &colour);
+        for (from, to) in chooser::sweep_arcs(draw_origin, t) {
+            draw_ring(from, to, &colour);
+        }
         return;
     }
 
@@ -446,6 +472,33 @@ fn draw_player(
     }
 
     draw_ring(0.0, TWO_PI, &ring);
+}
+
+/// A uniformly random point on the ring, in radians.
+///
+/// Where a mark's loading sweep starts, and where the draw's does, so that no two
+/// fills on a table begin in the same place. Uniform over the whole circle: a
+/// partial range would put every sweep in the same part of the ring and still look
+/// deliberate.
+///
+/// Straight from the CSPRNG rather than through `random_index`, which is for
+/// choosing a player: that has to be unbiased over the players *present*, which is
+/// a different question from being unbiased over a circle, and reusing it would put
+/// a modulo in the middle of a floating-point scale for no reason.
+fn random_angle() -> f64 {
+    // A failed draw falls back to a fixed angle rather than to a different one per
+    // attempt: this is decoration, and a CSPRNG that is refusing is not something to
+    // retry inside a pointer event.
+    let Ok(word) = getrandom::u64() else {
+        return 0.0;
+    };
+    // Assembled from two 32-bit halves rather than cast, because `f64` has no
+    // `From<u64>` and a direct cast would round: 52 bits is exactly an f64's
+    // mantissa, so this value is exact and the scaling adds no bias of its own.
+    let fraction = (f64::from((word >> 32) as u32) * 4_294_967_296.0
+        + f64::from((word & 0xFFFF_FFFF) as u32))
+        / 18_446_744_073_709_551_616.0;
+    fraction * std::f64::consts::TAU
 }
 
 /// One unbiased index into `len` players.

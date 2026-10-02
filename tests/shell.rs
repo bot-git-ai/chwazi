@@ -758,10 +758,9 @@ fn the_two_loadings_are_different_gestures() {
     // settles in place. That is the first loading.
     //
     // The draw window: the ring the first loading left behind is *covered* in the
-    // player's own colour, from the origin round. It is not a second sweep that
-    // makes the loaded ring disappear and then loads it again from nothing -- the
-    // difference between the two stages is a colour filling the band, not a length
-    // of arc growing.
+    // player's own colour. It is not a second sweep that makes the loaded ring
+    // disappear and then loads it again from nothing -- the difference between the
+    // two stages is a colour filling the band, not a length of arc growing.
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
     let draw = ui
         .split("fn draw_player(")
@@ -773,43 +772,70 @@ fn the_two_loadings_are_different_gestures() {
     let code = strip_rust_comments(draw);
     let flat: String = code.split_whitespace().collect();
 
-    // The first loading draws the loading tint, the second draws the resting ring
-    // UNDERNEATH and the player's colour ON TOP of it. The underneath ring is what
-    // makes it a covering rather than a re-sweep: without it the band's own tint
-    // would vanish and be re-loaded.
     assert!(
-        flat.contains("ifletSome(t)=loading{")
-            && flat.contains("draw_ring(origin-TWO_PI*t,origin,&loaded)"),
-        "the first loading sweeps the ring in its loading tint"
+        flat.contains("ifletSome(t)=loading{"),
+        "the first loading must be a distinct branch"
     );
     assert!(
-        flat.contains("ifletSome(t)=draw{draw_ring(0.0,TWO_PI,&ring);")
-            && flat.contains("draw_ring(origin-TWO_PI*t,origin,&colour)"),
+        flat.contains("draw_ring(0.0,TWO_PI,&ring);")
+            && flat.contains("chooser::sweep_arcs(draw_origin,t)"),
         "the second loading must draw the resting ring first and then cover it"
     );
-    // Order matters: the resting ring is laid down before the fill that covers it.
+    // The resting ring is laid down before the fill that covers it.
     let under = flat
         .find("draw_ring(0.0,TWO_PI,&ring);")
         .expect("the resting ring");
-    let over = flat
-        .find("draw_ring(origin-TWO_PI*t,origin,&colour)")
-        .expect("the fill");
+    let over = flat.find("sweep_arcs(draw_origin,t)").expect("the fill");
     assert!(
         under < over,
         "the ring must be drawn before the colour covers it"
     );
-    // And the loading tint is lighter than the resting ring, or "brighter" is a lie.
     assert!(
         flat.contains("&loaded") && flat.contains("&ring") && flat.contains("&colour"),
         "three distinct colours: the loading tint, the resting ring, and the fill"
     );
 
-    // The winner's ring keeps the colour the draw covered it in.
+    // Both loadings sweep from their own origin, in two halves, meeting opposite.
     //
-    // `draw` is `None` before a window opens *and* after one ends, so the winner
-    // and a merely-loaded player reach the same branch with the same arguments. They
-    // must not be drawn the same: the winner's ring held the resting tint for a
-    // moment after the window closed, so the charge visibly discharged.
+    // A single sweep from a fixed 135 degrees is what this replaced: it reads as a
+    // dial, and every mark on a table fills in lockstep from the same point, so the
+    // marks stop reading as belonging to particular fingers.
+    assert!(
+        flat.contains("chooser::sweep_arcs(load_origin,t)")
+            && flat.contains("chooser::sweep_arcs(draw_origin,t)"),
+        "both loadings must sweep from their own origin, in two halves"
+    );
+    assert!(
+        !code.contains("LOADING_ARC_START"),
+        "there is no fixed loading origin any more"
+    );
+    // The two arcs are stroked by looping over both, not by drawing one and
+    // mirroring: a mirror is the same shape twice and cannot be told apart if a
+    // half is ever a different length.
+    assert_eq!(
+        flat.matches("for(from,to)inchooser::sweep_arcs(").count(),
+        2,
+        "each loading strokes both of its halves"
+    );
+    // And each side is read from that player's own random origin rather than a
+    // literal. A fixed literal here would make every mark on a table fill in
+    // lockstep, which is what this change exists to stop -- and a test that only
+    // checks the call site cannot see it, because the call site looks the same
+    // either way. Both mutations below are caught by this and by nothing else.
+    assert!(
+        code.contains("let load_origin = player.load_origin;"),
+        "the registration must sweep from the player's own origin"
+    );
+    assert!(
+        !code.contains("2.35619449") && !code.contains("135.0"),
+        "and no fixed angle may stand in for it"
+    );
+    assert!(
+        code.contains("let draw_origin = app_draw_origin;"),
+        "the selection must sweep from the draw's own origin"
+    );
+
+    // The winner's ring keeps the colour the draw covered it in.
     assert!(
         code.contains("app_is_chosen: bool"),
         "the drawing needs to know whether this player was chosen, or it cannot \
@@ -820,22 +846,13 @@ fn the_two_loadings_are_different_gestures() {
         "a chosen player's ring must be drawn in the full colour, not the resting \
          tint -- the draw covers it in and it keeps that"
     );
-    // And the resting tint is still there for everyone else, so this is not simply
-    // "everybody is bright". Scoped to the last stroke in the function: the draw
-    // branch also draws the resting ring, underneath the colour that covers it, so
-    // a check anywhere in the function is satisfied by the wrong line.
-    let last_stroke = code
-        .rsplit("draw_ring(")
-        .next()
-        .expect("the last draw_ring call")
-        .to_owned();
+    let last_stroke = code.rsplit("draw_ring(").next().expect("the last stroke");
     assert!(
         last_stroke.contains("&ring)"),
         "a player who has not won still rests at the dim tint, as the last stroke: \
          {last_stroke}"
     );
 }
-
 /// The start screen is bare.
 ///
 /// The native app's start screen carries three things this one has no business

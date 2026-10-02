@@ -93,14 +93,6 @@ pub const RING_INNER_RADIUS: f64 = 47.5;
 /// reason the band has to be stroked at its middle rather than its edge.
 pub const RING_STROKE_RADIUS: f64 = f64::midpoint(MARK_RADIUS, RING_INNER_RADIUS);
 
-/// Where the selection sweep starts, in degrees on the canvas, measured clockwise
-/// from 3 o'clock.
-///
-/// 135 degrees, the same origin as the per-finger load. Both loadings start at
-/// 7:30 and run the same way, so a mark that has just been picked up and a mark
-/// waiting to be chosen are visibly the same gesture at two stages.
-pub const SELECTION_ARC_START: f64 = 135.0;
-
 /// The ring's width: the thickness of its own measured band, 9 CSS px.
 ///
 /// This is also the width both loading arcs are stroked at, so an arc *is* the
@@ -152,24 +144,24 @@ pub const COLOUR_LIGHTNESS: f64 = 49.0;
 pub const MAX_PULSE_SCALE: f64 = 0.065;
 
 /// How long a draw window lasts once two players are present.
-pub const DRAWING_TIME_MS: f64 = 2500.0;
+///
+/// 3000ms, chosen rather than measured, and the user asked for it.
+///
+/// The 2500ms before it came from the original app. The window now *covers* the
+/// ring in the player's colour rather than sweeping an arc, so its progress is
+/// legible as a filling band, and three seconds is long enough to read it as one.
+pub const DRAWING_TIME_MS: f64 = 3000.0;
 
 /// How long one finger takes to load its own mark.
 ///
-/// 620ms, measured frame by frame from a touchdown on a recording with Android's
-/// touch indicator off: the pale arc sweeps from a 14-degree stub to a closed
-/// circle, and the disc reaches its full 38.2 CSS px at about 100ms -- long before
-/// the arc is done.
+/// 1000ms, chosen rather than measured, and the user asked for it.
 ///
-/// So the load is **not** one thing growing. The disc arrives in a fifth of the
-/// time and then sits still while the arc takes another 500ms to come round, and
-/// the previous build had the disc's growth and the arc's sweep tied to the same
-/// number, so the mark simply inflated and stopped. That is the "too static" it was
-/// reported as: the eye was given 560ms of near-nothing.
-///
-/// The sweep is linear, at about 56 degrees per 50ms, with no easing visible in the
-/// samples -- so it is a constant rate here too, for the same reason the flood's is.
-pub const REGISTRATION_TIME_MS: f64 = 620.0;
+/// What the recording shows is 620ms: the disc reaches full size in about 100ms and
+/// the sweep closes over the rest. At that speed the sweep is over before anyone has
+/// registered that it was happening, and the two-sided sweep added to it needs room
+/// to be read at all -- two arcs meeting is legible as a gesture in a way one arc
+/// sweeping past is not.
+pub const REGISTRATION_TIME_MS: f64 = 1000.0;
 
 /// The share of the registration during which the disc reaches full size.
 ///
@@ -218,15 +210,6 @@ pub const LOADING_ARC_SCALE: f64 = RING_STROKE_RADIUS / DISC_RADIUS;
 /// between them, which is the same visual separation the mark's own gap uses.
 pub const LOADING_ARC_GROWTH: f64 = 10.0;
 
-/// Where the loading sweep starts, in degrees on the canvas, measured clockwise
-/// from 3 o'clock.
-///
-/// 135 degrees -- 7:30 on a clock face, the bottom-left of the mark -- measured as
-/// the arc's leading edge across the whole load: 146, 140, 134, 128, 122 ... it
-/// only ever moves in one direction from there, so the start is the one fixed
-/// value and the sweep is the moving one.
-pub const LOADING_ARC_START: f64 = 135.0;
-
 /// How long the winning colour takes to wipe down the screen.
 ///
 /// 300ms, chosen rather than measured, and the user asked for it.
@@ -266,6 +249,28 @@ pub const WINNER_RADIUS: f64 = 104.0;
 /// How long the chosen finger must be off the glass before the app resets.
 pub const RESTART_DELAY: f64 = 2000.0;
 
+/// The two arcs a loading sweep is drawn as, at `progress`.
+///
+/// A loading starts at a random point on the ring and closes from **both**
+/// sides, finishing at the point opposite where it started.
+///
+/// So at progress `t` each side has swept `t/2` of the circle, and the two meet
+/// exactly at the antipode when `t` is 1: two half-circles, adjacent, with no
+/// gap and no overlap. A single sweep from a fixed origin instead reads as a
+/// dial, which is a thing with a position rather than a thing that is arriving.
+///
+/// Returned as a `(from, to)` pair per side, so the caller can stroke two arcs.
+/// Angles are radians in canvas convention: 0 is 3 o'clock and they increase
+/// clockwise, which is the convention every `arc` call here already uses.
+///
+/// What the eye follows is the gap between the two closing, rather than a line
+/// lengthening.
+#[must_use]
+pub fn sweep_arcs(origin: f64, progress: f64) -> [(f64, f64); 2] {
+    let half = progress.clamp(0.0, 1.0) * std::f64::consts::PI;
+    [(origin, origin + half), (origin - half, origin)]
+}
+
 /// One finger on the glass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Player {
@@ -286,6 +291,16 @@ pub struct Player {
     /// mark charges from its own touchdown, so a finger that lands late does not
     /// appear already-loaded beside marks that have been charging for a second.
     pub joined_at: f64,
+    /// Where this mark's loading sweep starts, in radians around the ring.
+    ///
+    /// Chosen at random per finger, so a table of people all putting fingers down
+    /// together gets a different answer for each. A fixed start reads as a
+    /// deliberate mechanism; a random one reads as each mark doing its own thing,
+    /// which is what a mark belongs to a particular finger rather than to the app.
+    ///
+    /// It is drawn from the browser's CSPRNG by the front end, alongside the draw,
+    /// so this file stays free of a source of randomness it cannot test.
+    pub load_origin: f64,
 }
 
 impl Player {
@@ -412,6 +427,11 @@ pub struct Chooser {
     draw_started_at: Option<f64>,
     /// When the chosen finger lifted, if it has.
     chosen_lifted_at: Option<f64>,
+    /// Where the draw's sweep starts, in radians around the ring.
+    ///
+    /// Random per draw, for the same reason each finger's is: a draw is a fresh
+    /// event and it should not look like the last one replayed.
+    draw_origin: f64,
 }
 
 impl Chooser {
@@ -448,6 +468,15 @@ impl Chooser {
     #[must_use]
     pub fn is_chosen(&self) -> bool {
         self.chosen.is_some()
+    }
+
+    /// Where the draw's sweep starts, in radians around the ring.
+    ///
+    /// Random per draw, supplied by the front end when the draw is made. Zero before
+    /// any draw, which is only ever read while a winner has been chosen.
+    #[must_use]
+    pub fn draw_origin(&self) -> f64 {
+        self.draw_origin
     }
 
     /// When the current draw window opened, if one is running.
@@ -527,7 +556,7 @@ impl Chooser {
     /// Ignored once someone has been chosen: the winner's screen is showing
     /// until that finger lifts and the app resets, and a new finger landing
     /// during it is not a player.
-    pub fn pointer_down(&mut self, id: i32, x: f64, y: f64, now: f64) {
+    pub fn pointer_down(&mut self, id: i32, x: f64, y: f64, now: f64, load_origin: f64) {
         if self.chosen.is_some() {
             return;
         }
@@ -539,6 +568,7 @@ impl Chooser {
                 y,
                 chosen_at: None,
                 joined_at: now,
+                load_origin,
             },
         );
         self.restart_draw(now);
@@ -581,7 +611,7 @@ impl Chooser {
     /// their fingers are still down, but their circles are gone, because the
     /// original cleared the map around the winner and so did this.
     #[must_use]
-    pub fn draw(&mut self, now: f64, winner: usize) -> Option<i32> {
+    pub fn draw(&mut self, now: f64, winner: usize, draw_origin: f64) -> Option<i32> {
         // A draw needs two players and an unclaimed app, whatever the timer
         // thought it was doing.
         if self.players.len() < REQUIRED_PLAYER_COUNT || self.chosen.is_some() {
@@ -597,6 +627,7 @@ impl Chooser {
         }
         self.players.retain(|_, player| player.id == id);
         self.chosen = Some(id);
+        self.draw_origin = draw_origin;
         // The window is over: this flag, not the winner, is what stops a
         // pointer event arriving in the same frame from starting another draw.
         self.draw_started_at = None;
@@ -699,22 +730,22 @@ mod tests {
     /// "the draw has happened" are one step.
     fn won(winner: usize) -> Chooser {
         let mut chooser = drawing();
-        let _ = chooser.draw(0.0, winner);
+        let _ = chooser.draw(0.0, winner, 0.0);
         chooser
     }
 
     /// A chooser with two fingers down, mid-draw.
     fn drawing() -> Chooser {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 100.0, 200.0, 0.0);
-        chooser.pointer_down(2, 300.0, 400.0, 10.0);
+        chooser.pointer_down(1, 100.0, 200.0, 0.0, 0.0);
+        chooser.pointer_down(2, 300.0, 400.0, 10.0, 0.0);
         chooser
     }
 
     #[test]
     fn a_finger_down_is_a_player_at_that_point() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(7, 12.5, 34.0, 0.0);
+        chooser.pointer_down(7, 12.5, 34.0, 0.0, 0.0);
 
         let player = chooser.players().next().expect("one player");
         assert_eq!(player.id, 7);
@@ -768,19 +799,19 @@ mod tests {
     #[test]
     fn one_finger_is_not_a_draw() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
 
         assert_eq!(chooser.len(), REQUIRED_PLAYER_COUNT - 1);
         assert!(!chooser.is_drawing(), "a draw needs two players");
         assert!(chooser.draw_progress(0.0).is_none(), "and so no arc");
-        assert_eq!(chooser.draw(2500.0, 0), None, "and no winner");
+        assert_eq!(chooser.draw(2500.0, 0, 0.0), None, "and no winner");
     }
 
     #[test]
     fn a_second_finger_opens_the_draw() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 50.0, 50.0, 40.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 50.0, 50.0, 40.0, 0.0);
 
         assert!(chooser.is_drawing());
         assert_eq!(chooser.draw_started_at(), Some(40.0));
@@ -798,7 +829,7 @@ mod tests {
     #[test]
     fn a_third_finger_restarts_the_draw() {
         let mut chooser = drawing();
-        chooser.pointer_down(3, 10.0, 10.0, 500.0);
+        chooser.pointer_down(3, 10.0, 10.0, 500.0, 0.0);
 
         // The window counts from the latest change to who is on the glass, so
         // the last finger down gets the whole window.
@@ -817,7 +848,7 @@ mod tests {
         );
 
         // Put the finger back and the window starts again from now.
-        chooser.pointer_down(1, 100.0, 200.0, 200.0);
+        chooser.pointer_down(1, 100.0, 200.0, 200.0, 0.0);
         assert_eq!(chooser.draw_started_at(), Some(200.0));
     }
 
@@ -833,7 +864,7 @@ mod tests {
         for winner in 0..3 {
             let mut chooser = drawing();
             let chosen = chooser
-                .draw(2500.0, winner)
+                .draw(2500.0, winner, 0.0)
                 .expect("two players, so a winner");
 
             assert!([1, 2].contains(&chosen), "picked from the players");
@@ -849,7 +880,7 @@ mod tests {
         for index in 0..2 {
             let mut chooser = drawing();
             assert_eq!(
-                chooser.draw(2500.0, index),
+                chooser.draw(2500.0, index, 0.0),
                 Some(i32::try_from(index).unwrap() + 1)
             );
         }
@@ -858,7 +889,7 @@ mod tests {
     #[test]
     fn the_winner_is_anchored_to_the_instant_of_the_draw() {
         let mut chooser = drawing();
-        let _ = chooser.draw(2500.0, 0);
+        let _ = chooser.draw(2500.0, 0, 0.0);
 
         // A later frame must not restart the expansion.
         assert_eq!(chooser.chosen_progress(2500.0), Some(0.0));
@@ -872,14 +903,14 @@ mod tests {
     #[test]
     fn the_winner_survives_lifting_and_a_new_finger_lands_nowhere() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
 
         chooser.pointer_up(winner, 3000.0);
         assert_eq!(chooser.len(), 1, "the winner's circle stays put");
         assert_eq!(chooser.chosen().map(|p| p.id), Some(winner));
 
         // The app is not reset yet, so a new finger is not a player.
-        chooser.pointer_down(9, 10.0, 10.0, 3100.0);
+        chooser.pointer_down(9, 10.0, 10.0, 3100.0, 0.0);
         assert_eq!(chooser.len(), 1);
         assert!(!chooser.is_drawing());
     }
@@ -887,7 +918,7 @@ mod tests {
     #[test]
     fn the_reset_comes_exactly_two_seconds_after_the_winner_lifts() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
 
         chooser.pointer_up(winner, 3000.0);
         assert!(!chooser.tick(3000.0 + RESTART_DELAY - 1.0), "not yet");
@@ -902,22 +933,22 @@ mod tests {
     #[test]
     fn a_reset_chooser_can_draw_again() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
         chooser.pointer_up(winner, 3000.0);
         let _ = chooser.tick(3000.0 + RESTART_DELAY + 1.0);
 
-        chooser.pointer_down(4, 5.0, 5.0, 6000.0);
-        chooser.pointer_down(5, 6.0, 6.0, 6100.0);
+        chooser.pointer_down(4, 5.0, 5.0, 6000.0, 0.0);
+        chooser.pointer_down(5, 6.0, 6.0, 6100.0, 0.0);
 
         assert!(chooser.is_drawing(), "the app is reusable after a reset");
         assert!(chooser.chosen().is_none());
-        assert_eq!(chooser.draw(8600.0, 1), Some(5));
+        assert_eq!(chooser.draw(8600.0, 1, 0.0), Some(5));
     }
 
     #[test]
     fn a_winner_held_down_does_not_reset_the_app() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0).expect("a winner");
+        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
 
         // Still holding the winner: there is no "lifted" moment, so no reset,
         // however long the page is left alone.
@@ -931,9 +962,9 @@ mod tests {
     #[test]
     fn a_draw_while_a_winner_is_showing_does_nothing() {
         let mut chooser = drawing();
-        let _ = chooser.draw(2500.0, 0);
+        let _ = chooser.draw(2500.0, 0, 0.0);
 
-        assert_eq!(chooser.draw(3000.0, 1), None);
+        assert_eq!(chooser.draw(3000.0, 1, 0.0), None);
         assert_eq!(chooser.len(), 1, "still one player");
         assert!(chooser.is_chosen(), "still chosen");
     }
@@ -952,9 +983,9 @@ mod tests {
     #[test]
     fn a_draw_with_one_player_does_nothing() {
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
 
-        assert_eq!(chooser.draw(2500.0, 0), None);
+        assert_eq!(chooser.draw(2500.0, 0, 0.0), None);
         assert!(!chooser.is_chosen());
     }
 
@@ -963,7 +994,7 @@ mod tests {
         // Indices come from a random draw, so a caller may pass anything; an
         // out-of-range index must still name a real player.
         let mut chooser = drawing();
-        assert_eq!(chooser.draw(2500.0, 17), Some(2), "17 % 2 == 1");
+        assert_eq!(chooser.draw(2500.0, 17, 0.0), Some(2), "17 % 2 == 1");
     }
 
     #[test]
@@ -1124,13 +1155,13 @@ mod tests {
         // the hole at `winner.x, winner.y`, and a front that cannot see an x or a y
         // could not be a top-down wipe or a screen-centred disc.
         let mut a = Chooser::new();
-        a.pointer_down(1, 100.0, 100.0, 0.0);
-        a.pointer_down(2, 500.0, 900.0, 0.0);
-        let _ = a.draw(0.0, 0);
+        a.pointer_down(1, 100.0, 100.0, 0.0, 0.0);
+        a.pointer_down(2, 500.0, 900.0, 0.0, 0.0);
+        let _ = a.draw(0.0, 0, 0.0);
         let mut b = Chooser::new();
-        b.pointer_down(1, 500.0, 900.0, 0.0);
-        b.pointer_down(2, 100.0, 100.0, 0.0);
-        let _ = b.draw(0.0, 0);
+        b.pointer_down(1, 500.0, 900.0, 0.0, 0.0);
+        b.pointer_down(2, 100.0, 100.0, 0.0, 0.0);
+        let _ = b.draw(0.0, 0, 0.0);
 
         let at = CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0;
         let one = a.flood_hole(at, 1080.0, 2340.0).expect("a hole");
@@ -1266,9 +1297,9 @@ mod tests {
         // the players changed the screen by lifting, from a roster nobody looked at
         // for that long.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 10.0, 10.0, 0.0);
-        chooser.pointer_down(3, 20.0, 20.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 10.0, 10.0, 0.0, 0.0);
+        chooser.pointer_down(3, 20.0, 20.0, 0.0, 0.0);
         assert_eq!(chooser.draw_started_at(), Some(0.0));
 
         chooser.pointer_up(3, 100.0);
@@ -1294,9 +1325,9 @@ mod tests {
         // t=0, a third at t=700 -- the third has not loaded, so the clock waits for
         // it, and the two older marks do not shorten the wait.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 10.0, 10.0, 0.0);
-        chooser.pointer_down(3, 20.0, 20.0, 700.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 10.0, 10.0, 0.0, 0.0);
+        chooser.pointer_down(3, 20.0, 20.0, 700.0, 0.0);
 
         assert_eq!(
             chooser.ready_at(),
@@ -1319,12 +1350,12 @@ mod tests {
         // The app is meant to be passed around: putting a finger down while
         // somebody else's result is still on screen is ordinary, not an edge case.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 10.0, 10.0, 0.0);
-        let winner = chooser.draw(0.0, 0).expect("a winner");
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 10.0, 10.0, 0.0, 0.0);
+        let winner = chooser.draw(0.0, 0, 0.0).expect("a winner");
         chooser.pointer_up(winner, 10.0);
 
-        chooser.pointer_down(9, 100.0, 100.0, 500.0);
+        chooser.pointer_down(9, 100.0, 100.0, 500.0, 0.0);
         assert!(
             chooser.chosen().is_some_and(|p| p.id == winner),
             "the choice still stands until it expires"
@@ -1442,24 +1473,6 @@ mod tests {
     }
 
     #[test]
-    fn the_arc_sweeps_from_a_fixed_start_the_same_way_the_selection_does() {
-        // Measured: the registration sweep's leading edge is 146, 140, 134, 128, 122
-        // degrees... only ever one direction from a fixed 135. Both loadings start
-        // there, so a mark being picked up and a mark waiting to be chosen are
-        // visibly the same gesture at two stages.
-        const {
-            assert!(
-                (LOADING_ARC_START - 135.0).abs() < 1.0,
-                "the registration starts at 135 degrees, measured"
-            );
-            assert!(
-                (SELECTION_ARC_START - LOADING_ARC_START).abs() < 1e-9,
-                "and the selection starts where the registration does"
-            );
-        }
-    }
-
-    #[test]
     fn the_loading_arc_is_drawn_on_the_rings_own_band() {
         // The ring's band is 47.5 to 57.0 CSS px, and the arc sits at 47.8 measured
         // while the disc is at its full 38.2. It is the ring's own centreline, so
@@ -1495,8 +1508,8 @@ mod tests {
         // sweep looked like it belonged to whichever player happened to be orange
         // rather than to the finger that had just landed.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(4, 10.0, 10.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(4, 10.0, 10.0, 0.0, 0.0);
         let players: Vec<Player> = chooser.players().cloned().collect();
         let (a, b) = (&players[0], &players[1]);
 
@@ -1513,6 +1526,184 @@ mod tests {
     }
 
     #[test]
+    fn a_loading_closes_from_both_sides_and_meets_opposite() {
+        // The sweep is two halves growing from one origin, in opposite directions,
+        // and they meet exactly opposite when it is finished.
+        let origin = 0.7_f64;
+        let arcs = sweep_arcs(origin, 1.0);
+        let (from_a, to_a) = arcs[0];
+        let (from_b, to_b) = arcs[1];
+
+        // Each half is a half-circle, and the two together are the whole ring.
+        let a = to_a - from_a;
+        let b = to_b - from_b;
+        assert!(
+            (a - std::f64::consts::PI).abs() < 1e-9,
+            "each side sweeps exactly half the circle: {a}"
+        );
+        assert!(
+            (a + b - std::f64::consts::TAU).abs() < 1e-9,
+            "and together they cover the ring, not a part of it: {}",
+            a + b
+        );
+        // They start together at the origin...
+        assert!(
+            (from_a - origin).abs() < 1e-12 && (to_b - origin).abs() < 1e-12,
+            "both sides start at the origin: {from_a} and {to_b}"
+        );
+        // ...and finish together opposite it. `to_a` is the clockwise side's far
+        // end and `from_b` the anticlockwise side's, and they are the same angle --
+        // that angle being the origin plus half a turn.
+        let turn = std::f64::consts::TAU;
+        let far_a = to_a.rem_euclid(turn);
+        let far_b = from_b.rem_euclid(turn);
+        assert!(
+            (far_a - far_b).abs() < 1e-9,
+            "and finish together at {far_a} against {far_b}"
+        );
+        assert!(
+            (far_a - origin.rem_euclid(turn) - std::f64::consts::PI).abs() < 1e-9,
+            "which is half a turn round from the origin, i.e. opposite it: {far_a}"
+        );
+    }
+
+    #[test]
+    fn a_loading_is_two_sides_going_opposite_ways_from_one_origin() {
+        // The shape itself, as opposed to the arithmetic of how far round each side
+        // has got. A one-sided sweep -- the thing this replaced -- returns two arcs
+        // where the second is degenerate, and every other test here still passes on
+        // it, so the shape needs stating on its own.
+        let origin = 0.9_f64;
+        let (a_from, a_to) = sweep_arcs(origin, 0.5)[0];
+        let (b_from, b_to) = sweep_arcs(origin, 0.5)[1];
+
+        // One side runs anticlockwise *back* from the origin, the other clockwise
+        // *forward* from it. The canvas grows an arc from its smaller start angle to
+        // its larger, so the second side is written reversed -- hence the swap below.
+        assert!(
+            (a_to - a_from) > 0.0,
+            "the clockwise side runs forward from the origin"
+        );
+        assert!(
+            (b_to - b_from) > 0.0,
+            "and the other is written in reverse, so the canvas can draw it"
+        );
+        assert!(
+            (a_from - b_from) > 0.0,
+            "the two occupy opposite halves of the circle, not the same one: \
+             {a_from} against {b_from}"
+        );
+        // Both start at the origin, and the loading therefore begins as a point
+        // there rather than somewhere else on the ring.
+        assert!(
+            (a_from - origin).abs() < 1e-12 && (b_to - origin).abs() < 1e-12,
+            "both sides start at the origin"
+        );
+        // Neither side is degenerate at any point in the loading: a one-sided sweep
+        // leaves one of them zero-length for the whole window.
+        // Both sides are live and equal, and they leave the origin in opposite
+        // directions. The equality is what a degenerate one-sided arc fails: it
+        // returns one full half and one of zero length, which is still "both
+        // positive" for the first and "both equal" for neither, so the shape is
+        // pinned by the ratio rather than by a sign.
+        for step in 1..=20 {
+            let arcs = sweep_arcs(origin, f64::from(step) / 20.0);
+            let a = arcs[0].1 - arcs[0].0;
+            let b = arcs[1].1 - arcs[1].0;
+            assert!(
+                a > 0.0 && b > 0.0,
+                "both sides are live at step {step}: {a} and {b}"
+            );
+            assert!(
+                (a - b).abs() < 1e-12,
+                "and they are the same length, so neither is degenerate: {a}, {b}"
+            );
+            // Neither is the whole circle: each is half of the progress, reaching
+            // at most half a turn when the loading is done, so a single side
+            // covering all of it -- the sweep this replaced -- cannot pass.
+            assert!(
+                a <= std::f64::consts::PI + 1e-9,
+                "and each is at most half a turn at step {step}: {a}"
+            );
+            assert!(
+                arcs[0].0 - arcs[1].0 > 0.0,
+                "and they start from opposite sides of the origin: {} against {}",
+                arcs[0].0,
+                arcs[1].0
+            );
+        }
+    }
+
+    #[test]
+    fn a_loading_starts_nothing_and_grows_from_both_ends() {
+        let origin = 2.1_f64;
+        // Nothing at the start: both halves are zero-length at the origin, so the
+        // loading is invisible rather than a dot that has to be hidden.
+        let start = sweep_arcs(origin, 0.0);
+        assert!((start[0].1 - start[0].0).abs() < 1e-12);
+        assert!((start[1].1 - start[1].0).abs() < 1e-12);
+
+        // And it grows on both sides, symmetrically, with no gap opening up.
+        let mid = sweep_arcs(origin, 0.5);
+        let a = mid[0].1 - mid[0].0;
+        let b = mid[1].1 - mid[1].0;
+        assert!((a - b).abs() < 1e-12, "the two sides stay the same length");
+        assert!(a > 0.0, "and both are growing");
+
+        // Monotone in progress, and clamped outside the window.
+        let mut last = 0.0_f64;
+        for step in 0..=40 {
+            let arcs = sweep_arcs(origin, f64::from(step) / 40.0);
+            let grown = (arcs[0].1 - arcs[0].0) + (arcs[1].1 - arcs[1].0);
+            assert!(grown >= last - 1e-12, "not monotone at step {step}");
+            last = grown;
+        }
+        assert_eq!(
+            sweep_arcs(origin, 2.0),
+            sweep_arcs(origin, 1.0),
+            "clamped above"
+        );
+        assert_eq!(
+            sweep_arcs(origin, -1.0),
+            sweep_arcs(origin, 0.0),
+            "and below"
+        );
+    }
+
+    #[test]
+    fn each_loading_starts_from_its_own_origin() {
+        // A table of fingers all landing together must not fill in lockstep from
+        // one place, or the marks stop reading as belonging to particular fingers.
+        // The origin is supplied per finger, so this is a matter of the state
+        // keeping them apart.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.25);
+        chooser.pointer_down(2, 50.0, 50.0, 0.0, 1.75);
+        chooser.pointer_down(3, 90.0, 90.0, 0.0, 4.5);
+        let origins: Vec<f64> = chooser.players().map(|p| p.load_origin).collect();
+        assert_eq!(origins, vec![0.25, 1.75, 4.5], "each mark keeps its own");
+        // And a different origin gives a different pair of arcs, so the geometry
+        // really does depend on it.
+        assert_ne!(sweep_arcs(0.25, 0.5), sweep_arcs(1.75, 0.5));
+    }
+
+    #[test]
+    fn the_two_loadings_take_one_and_three_seconds() {
+        // Both durations are the user's choice, stated as such where they are
+        // defined. They are asserted here so a change to either is deliberate.
+        assert!((REGISTRATION_TIME_MS - 1000.0).abs() < 1e-9);
+        assert!((DRAWING_TIME_MS - 3000.0).abs() < 1e-9);
+        // And the draw is long enough to be read as counting down rather than as a
+        // flash, which is why it is not the original app's 2500ms.
+        const {
+            assert!(
+                DRAWING_TIME_MS > REGISTRATION_TIME_MS,
+                "the selection takes longer than the arrival"
+            );
+        }
+    }
+
+    #[test]
     fn a_chosen_player_stays_chosen_and_keeps_its_ring_loaded() {
         // The winner's ring filled up with the player's colour over the draw window
         // and has to stay that way.
@@ -1523,12 +1714,14 @@ mod tests {
         // the winner's ring dimmed the instant the window closed. The charge visibly
         // discharged, which is the opposite of what being chosen should look like.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 100.0, 100.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 0.0, 0.0);
         let ready = chooser.ready_at().expect("a window");
         assert!(!chooser.is_chosen(), "nobody has won yet");
 
-        let winner = chooser.draw(ready + DRAWING_TIME_MS, 0).expect("a winner");
+        let winner = chooser
+            .draw(ready + DRAWING_TIME_MS, 0, 0.0)
+            .expect("a winner");
 
         // The window is over, so the draw no longer has a progress to report...
         assert!(
@@ -1574,8 +1767,8 @@ mod tests {
         // expiring is picked from a mark still charging, from a screen whose other
         // marks had not arrived -- a screen nobody saw.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 100.0, 100.0, 400.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 400.0, 0.0);
 
         assert!(chooser.is_drawing(), "the window is open");
         assert!(!chooser.is_ready(400.0), "but it is not counting yet");
@@ -1587,7 +1780,7 @@ mod tests {
 
         // A third finger at the instant the window was about to fire pushes it out.
         let ready = chooser.ready_at().expect("a window");
-        chooser.pointer_down(3, 50.0, 50.0, ready);
+        chooser.pointer_down(3, 50.0, 50.0, ready, 0.0);
         assert!(!chooser.is_ready(ready), "a late finger holds it back");
         assert_eq!(chooser.ready_at(), Some(ready + REGISTRATION_TIME_MS));
     }
@@ -1597,8 +1790,8 @@ mod tests {
         // The two loadings never overlap, so the eye is never asked to follow both
         // at once: the mark finishes charging, and then the draw's arc begins.
         let mut chooser = Chooser::new();
-        chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 100.0, 100.0, 0.0);
+        chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 0.0, 0.0);
         let ready = chooser.ready_at().expect("a window");
 
         assert_eq!(chooser.draw_progress(ready), Some(0.0), "it starts there");
@@ -1633,10 +1826,10 @@ mod tests {
         // which index it passes in.
         fn run() -> Chooser {
             let mut chooser = Chooser::new();
-            chooser.pointer_down(3, 1.0, 2.0, 0.0);
-            chooser.pointer_down(1, 3.0, 4.0, 0.0);
+            chooser.pointer_down(3, 1.0, 2.0, 0.0, 0.0);
+            chooser.pointer_down(1, 3.0, 4.0, 0.0, 0.0);
             chooser.pointer_move(3, 9.0, 9.0);
-            let _ = chooser.draw(DRAWING_TIME_MS, 1);
+            let _ = chooser.draw(DRAWING_TIME_MS, 1, 0.0);
             chooser
         }
         assert_eq!(run(), run());

@@ -93,14 +93,13 @@ pub const RING_INNER_RADIUS: f64 = 47.5;
 /// reason the band has to be stroked at its middle rather than its edge.
 pub const RING_STROKE_RADIUS: f64 = f64::midpoint(MARK_RADIUS, RING_INNER_RADIUS);
 
-/// How far outside the ring the draw's own arc sits, in CSS px.
+/// Where the selection sweep starts, in degrees on the canvas, measured clockwise
+/// from 3 o'clock.
 ///
-/// The two loadings must never be on the same pixels, or the draw's fill covers the
-/// registration sweep and the first loading becomes invisible for the whole window --
-/// which is what happened when both were drawn on the ring's own radius. 2 CSS px is
-/// enough to separate them at this ring thickness and small enough that the pair
-/// still reads as one ring rather than two concentric circles.
-pub const LOADING_GROWTH: f64 = 2.0;
+/// 135 degrees, the same origin as the per-finger load. Both loadings start at
+/// 7:30 and run the same way, so a mark that has just been picked up and a mark
+/// waiting to be chosen are visibly the same gesture at two stages.
+pub const SELECTION_ARC_START: f64 = 135.0;
 
 /// The ring's width: the thickness of its own measured band, 9 CSS px.
 ///
@@ -157,14 +156,57 @@ pub const DRAWING_TIME_MS: f64 = 2500.0;
 
 /// How long one finger takes to load its own mark.
 ///
-/// 560ms, measured frame by frame from touchdown: the disc reaches full size at
-/// 0.87s having started at 0.75s, and the pale ring sweeps from a point to a
-/// closed circle across the same window.
+/// 620ms, measured frame by frame from a touchdown on a recording with Android's
+/// touch indicator off: the pale arc sweeps from a 14-degree stub to a closed
+/// circle, and the disc reaches its full 38.2 CSS px at about 100ms -- long before
+/// the arc is done.
 ///
-/// This is the app's first of two loadings, and it is per finger rather than per
-/// draw. It is why a mark is an *event* on the glass rather than something that
-/// is simply already there.
-pub const REGISTRATION_TIME_MS: f64 = 560.0;
+/// So the load is **not** one thing growing. The disc arrives in a fifth of the
+/// time and then sits still while the arc takes another 500ms to come round, and
+/// the previous build had the disc's growth and the arc's sweep tied to the same
+/// number, so the mark simply inflated and stopped. That is the "too static" it was
+/// reported as: the eye was given 560ms of near-nothing.
+///
+/// The sweep is linear, at about 56 degrees per 50ms, with no easing visible in the
+/// samples -- so it is a constant rate here too, for the same reason the flood's is.
+pub const REGISTRATION_TIME_MS: f64 = 620.0;
+
+/// The share of the registration during which the disc reaches full size.
+///
+/// 0.16 -- about 100ms of the 620ms load. Measured: the disc's radius is 20.7 CSS
+/// px at 25ms into the load, 29 at 75ms, 35.7 at 100ms, and then it sits within a
+/// pixel of 38.2 for the remaining 500ms while the arc sweeps.
+///
+/// The split matters because the two halves are different events. A disc that
+/// inflates over the whole window reads as one slow growth and nothing else, which
+/// is what "the initial loading is too static" describes: the mark becomes the
+/// right size early and then spends four fifths of its time sitting there.
+pub const DISC_ARRIVAL_FRACTION: f64 = 0.16;
+
+/// How much of the disc's radius the loading arc is drawn at, as a multiple.
+///
+/// 1.368, which is the ring's own centreline divided by the disc's radius: the band
+/// runs 47.5 to 57.0 CSS px so its middle is 52.25, and 52.25 / 38.2 = 1.368.
+///
+/// It is expressed as a multiple of the disc's *full* radius, and that is the whole
+/// point. Scaling the arc by the loading fraction instead, which a build did, puts
+/// it in a different place every frame: it drifts inward as the mark loads and ends
+/// up nowhere near the ring, so the mark's three bands stop lining up with each
+/// other. That is the misalignment reported with this change, and it is invisible in
+/// the numbers -- only the multiplication is wrong.
+///
+/// The constant is derived from the band geometry rather than measured separately,
+/// so it cannot drift out of agreement with the ring it is supposed to trace.
+pub const LOADING_ARC_SCALE: f64 = RING_STROKE_RADIUS / DISC_RADIUS;
+
+/// Where the loading sweep starts, in degrees on the canvas, measured clockwise
+/// from 3 o'clock.
+///
+/// 135 degrees -- 7:30 on a clock face, the bottom-left of the mark -- measured as
+/// the arc's leading edge across the whole load: 146, 140, 134, 128, 122 ... it
+/// only ever moves in one direction from there, so the start is the one fixed
+/// value and the sweep is the moving one.
+pub const LOADING_ARC_START: f64 = 135.0;
 
 /// How long the winning colour takes to wipe down the screen.
 ///
@@ -228,6 +270,24 @@ pub struct Player {
 }
 
 impl Player {
+    /// How far the disc's own arrival has got, given how far the load has got.
+    ///
+    /// The disc reaches full size in the first [`DISC_ARRIVAL_FRACTION`] of the
+    /// load, so the two are fractions of different things and the arrival is
+    /// `loading / DISC_ARRIVAL_FRACTION`, not `loading * DISC_ARRIVAL_FRACTION`.
+    ///
+    /// It was multiplied once, and that never exceeds 0.16: the disc was drawn at a
+    /// sixteenth of its size for the entire load and only reached full size when the
+    /// load ended. The mark read as a black hole with a bright ring round it for
+    /// 620ms. It is arithmetic on a number that looks right in both forms, which is
+    /// why it is a function with a test rather than a line inside the renderer.
+    #[must_use]
+    pub fn disc_arrival(loading: f64) -> f64 {
+        let arrived = (loading / DISC_ARRIVAL_FRACTION).clamp(0.0, 1.0);
+        // Eased out, matching the measured radii: fast at first, then flattening.
+        arrived * arrived * (3.0 - 2.0 * arrived)
+    }
+
     /// How far this player's own mark has loaded at `timestamp`, 0 to 1.
     ///
     /// `None` once the mark has finished loading, so a settled mark costs nothing
@@ -250,6 +310,26 @@ impl Player {
         format!(
             "hsl({hue:.0}, 100%, {:.1}%)",
             COLOUR_LIGHTNESS * RING_DARKEN
+        )
+    }
+
+    /// The colour of this player's loading sweep: their own colour, lifted toward
+    /// white.
+    ///
+    /// It has to follow the player's hue. A single fixed pale colour is orange
+    /// against every hue that is not orange, so the sweep appeared to belong to
+    /// whichever player happened to be orange rather than to the finger that had
+    /// just landed -- which is exactly backwards for a loading indicator.
+    ///
+    /// It is the ring's own colour lightened rather than the app's off-white, so
+    /// the sweep is visibly the same mark at a moment when its ring is only partly
+    /// there.
+    #[must_use]
+    pub fn loading_color(&self) -> String {
+        let hue = (f64::from(self.id) * 223.0 + 263.0).rem_euclid(360.0);
+        format!(
+            "hsl({hue:.0}, 100%, {:.1}%)",
+            100.0 - (100.0 - COLOUR_LIGHTNESS) * 0.35
         )
     }
     /// The colour of pointer `id`.
@@ -1302,30 +1382,140 @@ mod tests {
     }
 
     #[test]
-    fn a_mark_charges_from_its_own_touchdown() {
-        // The first of the app's two loadings, and the reason a mark is an event
-        // rather than something that is simply there. Measured: 560ms from touch
-        // to full size, with a pale ring sweeping round behind the growing disc.
+    fn the_disc_reaches_full_size_early_and_the_loading_is_a_share_not_a_duration() {
+        // The bug this pins: `loading / DISC_ARRIVAL_FRACTION` and
+        // `loading * DISC_ARRIVAL_FRACTION` differ by an order of magnitude, and only
+        // one of them ever reaches 1. Multiplying capped the disc at a sixteenth of
+        // its size for the whole load.
+        assert!(
+            (Player::disc_arrival(DISC_ARRIVAL_FRACTION) - 1.0).abs() < 1e-9,
+            "the disc is full size when the arrival fraction has elapsed"
+        );
+        assert!(
+            Player::disc_arrival(DISC_ARRIVAL_FRACTION / 2.0) > 0.4,
+            "and most of the way there by half of it: {}",
+            Player::disc_arrival(DISC_ARRIVAL_FRACTION / 2.0)
+        );
+        // Monotone, bounded, and never above 1 -- an ease that overshoots would make
+        // the disc grow past its own size and shrink back.
+        let mut last = f64::NEG_INFINITY;
+        for step in 0..=40 {
+            let v = Player::disc_arrival(f64::from(step) / 40.0);
+            assert!(v >= last - 1e-12, "not monotone at step {step}");
+            assert!((0.0..=1.0).contains(&v), "out of range at step {step}: {v}");
+            last = v;
+        }
+        // Halfway through the load the disc is long since arrived.
+        assert!(
+            Player::disc_arrival(0.5) > 0.99,
+            "and it is still full size late in the load"
+        );
+    }
+
+    #[test]
+    fn the_load_is_two_events_not_one_slow_growth() {
+        // Measured from a touchdown: the disc reaches full size at about 100ms of a
+        // 620ms load and then sits within a pixel of its final radius for the
+        // remaining 500ms while the arc sweeps round.
+        //
+        // The previous build grew the disc over the whole window, so the mark became
+        // the right size early and then spent four fifths of its time sitting
+        // there. That is what "the initial loading is too static" describes, and it
+        // is why the split is two constants rather than one.
+        const {
+            assert!(
+                DISC_ARRIVAL_FRACTION < 0.25,
+                "the disc arrives in the first fifth of the load"
+            );
+            assert!(
+                DISC_ARRIVAL_FRACTION * REGISTRATION_TIME_MS > 50.0,
+                "and that is long enough to read as an arrival, not a pop"
+            );
+            assert!(
+                DISC_ARRIVAL_FRACTION * REGISTRATION_TIME_MS < 200.0,
+                "and short enough that most of the load is the arc's sweep"
+            );
+        }
+        // The arc is what fills the rest of the window, so it has to be the longer
+        // of the two -- a mark that finishes loading before its sweep is done is a
+        // mark whose sweep is decoration.
+        const {
+            assert!(
+                (1.0 - DISC_ARRIVAL_FRACTION) * REGISTRATION_TIME_MS > 300.0,
+                "the sweep is the bulk of the load"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arc_sweeps_from_a_fixed_start_the_same_way_the_selection_does() {
+        // Measured: the registration sweep's leading edge is 146, 140, 134, 128, 122
+        // degrees... only ever one direction from a fixed 135. Both loadings start
+        // there, so a mark being picked up and a mark waiting to be chosen are
+        // visibly the same gesture at two stages.
+        const {
+            assert!(
+                (LOADING_ARC_START - 135.0).abs() < 1.0,
+                "the registration starts at 135 degrees, measured"
+            );
+            assert!(
+                (SELECTION_ARC_START - LOADING_ARC_START).abs() < 1e-9,
+                "and the selection starts where the registration does"
+            );
+        }
+    }
+
+    #[test]
+    fn the_loading_arc_is_drawn_on_the_rings_own_band() {
+        // The ring's band is 47.5 to 57.0 CSS px, and the arc sits at 47.8 measured
+        // while the disc is at its full 38.2. It is the ring's own centreline, so
+        // the arc the mark is loaded with and the ring it ends up with are the same
+        // circle.
+        const {
+            assert!(
+                (RING_STROKE_RADIUS - 52.25).abs() < 0.2,
+                "the ring's centreline is 52.25 CSS px, and the arc uses it"
+            );
+        }
+        // A multiple of the disc's *full* radius, and exactly the ring's own
+        // centreline. If it were a multiple of the disc's *current* radius it would
+        // drift inward every frame and never meet the ring.
+        const {
+            assert!(
+                (DISC_RADIUS * LOADING_ARC_SCALE - RING_STROKE_RADIUS).abs() < 1e-9,
+                "the arc's radius IS the ring's centreline, derived rather than \
+                 measured a second time"
+            );
+        }
+        const {
+            assert!(
+                (LOADING_ARC_SCALE - 1.368).abs() < 0.005,
+                "which is 1.368x the disc"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loading_sweep_is_the_players_own_colour() {
+        // A fixed pale colour is orange against every hue that is not orange, so the
+        // sweep looked like it belonged to whichever player happened to be orange
+        // rather than to the finger that had just landed.
         let mut chooser = Chooser::new();
         chooser.pointer_down(1, 0.0, 0.0, 0.0);
-        chooser.pointer_down(2, 100.0, 100.0, 400.0);
+        chooser.pointer_down(4, 10.0, 10.0, 0.0);
+        let players: Vec<Player> = chooser.players().cloned().collect();
+        let (a, b) = (&players[0], &players[1]);
 
-        let early = chooser.players().next().expect("a player");
-        assert_eq!(
-            early.registration(0.0),
-            Some(0.0),
-            "it starts loading the instant it lands"
+        assert_ne!(a.color_of(), b.color_of(), "the players differ in colour");
+        assert_ne!(
+            a.loading_color(),
+            b.loading_color(),
+            "so their loading sweeps must differ too"
         );
-        assert_eq!(early.registration(REGISTRATION_TIME_MS / 2.0), Some(0.5));
-        assert_eq!(
-            early.registration(REGISTRATION_TIME_MS),
-            None,
-            "and stops costing anything once it has arrived"
-        );
-        // A later finger is measured from its own landing, not from the first.
-        let late = chooser.players().nth(1).expect("the second player");
-        assert_eq!(late.registration(400.0), Some(0.0));
-        assert_eq!(late.registration(400.0 + REGISTRATION_TIME_MS), None);
+        // And the sweep is a lightened version of the player's own colour, so it
+        // reads as the same mark rather than as a foreign highlight on it.
+        assert_ne!(a.loading_color(), a.color_of());
+        assert_ne!(a.loading_color(), a.ring_color());
     }
 
     #[test]

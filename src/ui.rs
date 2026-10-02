@@ -25,11 +25,6 @@ use crate::chooser::{self, Chooser, Player};
 /// A full turn of the circle, and the arc every stroke sweeps.
 const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
 
-/// The unfilled part of the draw's own arc: a dim white track, so the filled part
-/// in the dot's colour reads as arriving into something rather than as a line
-/// growing on a black screen.
-const LOADING_COLOR: &str = "rgba(255, 255, 255, 0.34)";
-
 /// The scope this app's worker is registered for.
 ///
 /// Stated rather than inherited, and it is the one string that has to agree
@@ -302,13 +297,18 @@ fn paint(
 
     let progress = app.draw_progress(timestamp);
     for player in app.players() {
-        // The first loading, as a fraction rather than a flag, so the mark grows
-        // into place instead of appearing at full size: the measured radii over the
-        // first 120ms are 8, 16, 19, 23, 26, 29, 33 CSS px, fast at first and then
-        // settling. Each mark charges from its own touchdown.
-        let loading = player
-            .registration(timestamp)
-            .map(|l| l * l * (3.0 - 2.0 * l));
+        // The first loading, as a raw fraction. The easing is applied once, in
+        // `draw_player`, and only to the disc.
+        //
+        // It was applied here as well, and applying a smoothstep twice is not a
+        // cosmetic slip: at a third of the way through the load the fraction is
+        // 0.29, the eased disc is 0.23, and eased again it is 0.05. The disc was
+        // being drawn at a twentieth of its size, so the mark read as a black hole
+        // with a bright ring round it.
+        //
+        // The arc is not eased at all. Measured, the sweep is linear, and easing it
+        // too would be inventing a curve the samples do not show.
+        let loading = player.registration(timestamp);
         draw_player(context, player, pulse, loading, progress);
     }
 }
@@ -336,17 +336,25 @@ fn draw_player(
     draw: Option<f64>,
 ) {
     let colour = player.color_of();
-    // The whole mark breathes in the pulse, and a finger that is still registering
-    // grows into its place: a mark that is a third loaded is a third of every band,
-    // which is what makes it read as arriving rather than as fading in.
-    let scale = pulse * loading.unwrap_or(1.0);
+    // The whole mark breathes in the pulse.
+    let scale = pulse;
+
+    // The disc grows into its place on its own, much faster than the loading arc
+    // sweeps: measured, it reaches full size at about 100ms of a 620ms load, and
+    // then sits still for the remaining 500ms while the arc comes round.
+    //
+    // Tying the disc's growth to the same fraction as the sweep is what made the
+    // load look static -- the mark inflated slowly and then stopped, and the eye
+    // was given most of a second of nothing. The disc's arrival is front-loaded and
+    // eased, and the arc does the rest of the work.
+    let disc_scale = loading.map_or(1.0, Player::disc_arrival);
 
     // The saturated disc.
     context.begin_path();
     if let Err(error) = context.arc(
         player.x,
         player.y,
-        chooser::DISC_RADIUS * scale,
+        chooser::DISC_RADIUS * disc_scale,
         0.0,
         TWO_PI,
     ) {
@@ -385,50 +393,72 @@ fn draw_player(
         context.stroke();
     }
 
-    // The first loading: the finger's own registration, 560ms from touchdown. A pale
-    // arc -- the centre dot's colour -- sweeps the ring's band from nothing round
-    // to closed, while the disc beneath it grows to full size.
+    // The first loading: the finger's own registration. A pale arc sweeps the ring's
+    // band from a fixed start at 7:30 round to closed, over 620ms, while the disc
+    // beneath it has already arrived.
     //
-    // It is the arc's *leading end* that is bright and the trail behind it that is
-    // dim, so the eye can follow the sweep rather than seeing a brightening ring.
+    // Three things this has to get right, and each was wrong in a build:
+    //
+    // * the radius. It is the ring's own radius, unscaled by the loading fraction.
+    //   Scaling it drags the arc inward every frame, so it drifts out of the ring's
+    //   band and the mark's bands stop lining up -- the misalignment reported with
+    //   this fix.
+    // * the colour. The player's own colour, washed toward white, not a fixed
+    //   warm off-white. A constant pale colour is orange against every hue that is
+    //   not orange, which is why the sweep looked like it belonged to nobody.
+    // * the start angle. Measured, the sweep's leading edge is 146, 140, 134, 128,
+    //   122 degrees... it only ever moves one way, so the fixed 135 is the origin
+    //   and not part of the animation.
     if let Some(loading) = loading {
+        let start = chooser::LOADING_ARC_START.to_radians();
         context.begin_path();
         if context
-            .arc(player.x, player.y, ring_radius, 0.0, TWO_PI * loading)
+            .arc(
+                player.x,
+                player.y,
+                ring_radius,
+                start,
+                start + TWO_PI * loading,
+            )
             .is_ok()
         {
             context.set_line_width(chooser::ARC_WIDTH * scale);
-            context.set_stroke_style_str(chooser::DOT_COLOUR);
+            let arc = player.loading_color();
+            context.set_stroke_style_str(&arc);
             context.stroke();
         }
     }
 
-    // The second loading: the draw. This is the one that fills, and it is a
-    // different gesture on purpose -- the ring's band fills from the dot's colour
-    // progressively, and it is drawn as a *second, slightly larger* arc so the two
-    // are never on the same pixels.
+    // The second loading: the draw window closing.
     //
-    // The previous version drew a translucent grey arc shrinking the ring away,
-    // which is a countdown. This is a fill: the ring's band goes from the ring's
-    // own tint to the dot's pale colour as the window closes, and because it is a
-    // fill and not a gap it reads as something arriving rather than something
-    // running out.
+    // The ring's band fills up with the player's own colour over the window, so the
+    // ring visibly charges rather than sitting there for two and a half seconds.
+    //
+    // It is drawn on the ring's *own* radius, not on a second circle offset outside
+    // it. The previous build offset it by 2px so the two loadings could not overlap,
+    // which solved a real problem with the wrong tool: a second circle is a visibly
+    // misaligned ring, and a misaligned ring is worse than one circle the two
+    // loadings take turns on. They never coexist regardless -- the registration ends
+    // before the draw opens, because the draw does not start counting until every
+    // mark has arrived.
     if let Some(progress) = draw {
-        let radius = ring_radius + chooser::LOADING_GROWTH * scale;
-        context.begin_path();
-        if context.arc(player.x, player.y, radius, 0.0, TWO_PI).is_ok() {
-            context.set_line_width(chooser::ARC_WIDTH * scale);
-            context.set_stroke_style_str(LOADING_COLOR);
-            context.stroke();
-        }
-        // The part already filled, in the dot's colour, sitting just inside it.
+        let start = chooser::SELECTION_ARC_START.to_radians();
         context.begin_path();
         if context
-            .arc(player.x, player.y, radius, 0.0, TWO_PI * progress)
+            .arc(
+                player.x,
+                player.y,
+                ring_radius,
+                start,
+                start + TWO_PI * progress,
+            )
             .is_ok()
         {
             context.set_line_width(chooser::ARC_WIDTH * scale);
-            context.set_stroke_style_str(chooser::DOT_COLOUR);
+            // The player's own colour, not a fixed pale one: a constant colour is
+            // orange against every hue that is not orange, so the fill looked like it
+            // belonged to whichever player happened to be orange.
+            context.set_stroke_style_str(&colour);
             context.stroke();
         }
     }

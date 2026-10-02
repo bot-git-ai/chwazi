@@ -38,6 +38,32 @@ fn worker() -> String {
         .expect("the committed worker template")
 }
 
+/// The radius argument of every `.arc(` call in `source`.
+///
+/// Multi-line calls are handled, so this does not care how a call is formatted, and
+/// it returns the third argument -- the radius, after the centre pair.
+///
+/// Written as a parser rather than a line filter because a line filter cannot tell
+/// the radius from the x-coordinate, and it did not: it reported `player.x,` as the
+/// radius. A test that inspects the wrong argument is worse than no test, because
+/// it is the kind that passes.
+fn arc_radii(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find(".arc(") {
+        let after = &rest[at + ".arc(".len()..];
+        let Some(end) = after.find(')') else {
+            break;
+        };
+        let args: Vec<&str> = after[..end].split(',').map(str::trim).collect();
+        if let Some(radius) = args.get(2) {
+            out.push((*radius).to_string());
+        }
+        rest = &after[end..];
+    }
+    out
+}
+
 /// Rust source with every comment removed, for substring assertions.
 ///
 /// A test that asserts on source text is asserting on the wrong thing if it can be
@@ -627,12 +653,22 @@ fn the_mark_is_three_bands_in_measured_order() {
         fills <= 1,
         "only the disc is filled; the dot was a second fill, and there are {fills}"
     );
-    let disc = draw.find("DISC_RADIUS * scale").expect("the disc");
+    let disc = draw.find("DISC_RADIUS * disc_scale").expect("the disc");
     let ring = draw.find("RING_STROKE_RADIUS * scale").expect("the ring");
-    let arc = draw.find("LOADING_COLOR").expect("the draw's arc");
+    // The ring's track is laid down before either loading, because a sweep drawn
+    // onto nothing has nothing to reveal -- which is what made the first version of
+    // the registration invisible.
+    let track = draw.find("player.ring_color()").expect("the ring's track");
+    let reg = draw
+        .find("player.loading_color()")
+        .expect("the registration sweep");
+    let sel = draw
+        .find("set_stroke_style_str(&colour)")
+        .expect("the selection fill");
     assert!(
-        disc < ring && ring < arc,
-        "draw order must be disc ({disc}), ring ({ring}), loading arc ({arc})"
+        disc < ring && ring < track && track < reg && reg < sel,
+        "draw order must be disc ({disc}), ring ({ring}), ring track ({track}), \
+         registration sweep ({reg}), selection fill ({sel})"
     );
 
     // The ring is stroked at the band's *centreline*, at its own width.
@@ -698,17 +734,6 @@ fn the_mark_is_three_bands_in_measured_order() {
         "and at the middle of its measured band"
     );
 
-    // The two loadings must not share pixels, or the draw's fill covers the
-    // registration sweep and the first loading is invisible for the whole window.
-    assert!(
-        draw.contains("LOADING_GROWTH"),
-        "the draw's arc must sit outside the ring so the two loadings never overlap"
-    );
-    assert!(
-        !draw.contains("RING_STROKE_RADIUS * scale, 0.0, TWO_PI * progress)"),
-        "the draw's fill must not be drawn on the ring's own radius"
-    );
-
     // Both loadings are driven by their own progress, not by one shared number: the
     // per-finger one comes from the player's own registration and the draw's from
     // the window.
@@ -721,21 +746,28 @@ fn the_mark_is_three_bands_in_measured_order() {
     // The per-finger loading is passed in as a fraction, so the mark grows into
     // place rather than appearing at full size or snapping in.
     assert!(
-        draw.contains("if let Some(loading) = loading"),
+        code.contains("if let Some(loading) = loading"),
         "the per-finger loading must reach the drawing code as a fraction"
     );
-    // `paint` reads it off the player, not off a flag: the fraction belongs to the
-    // finger, so each mark charges from its own touchdown.
+
+    // Neither loading may be drawn in a fixed pale colour.
+    //
+    // A constant colour is orange against every hue that is not orange, so the sweep
+    // and the fill looked like they belonged to whichever player happened to be
+    // orange rather than to the finger that had just landed. Both must ask the
+    // player for their own colour.
+    for fixed in ["DOT_COLOUR", "LOADING_COLOR"] {
+        assert!(
+            !code.contains(fixed),
+            "{fixed} is a fixed pale colour; the loadings must use the player's own"
+        );
+    }
     assert!(
-        ui.contains(".registration(timestamp)"),
-        "and it must come from the player's own registration, in paint"
-    );
-    assert!(
-        ui.contains("flood_radius"),
-        "the flood must be a disc growing from the winner's own mark"
+        code.contains("player.loading_color()") && code.contains("set_stroke_style_str(&colour)"),
+        "the registration uses the player's lifted colour and the selection the \
+         player's own, so each sweep belongs to the finger it is on"
     );
 }
-
 #[test]
 fn the_mark_colours_are_measured() {
     // The colours, measured on an indicator-off frame.
@@ -756,6 +788,73 @@ fn the_mark_colours_are_measured() {
     assert!(
         chooser.contains("DOT_COLOUR") && chooser.contains("RING_DARKEN"),
         "the loadings' colour and the ring's darkening must be the sampled ones"
+    );
+}
+
+#[test]
+fn every_loading_arc_is_drawn_on_the_rings_own_radius() {
+    let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
+    let draw = ui
+        .split("fn draw_player(")
+        .nth(1)
+        .expect("draw_player")
+        .split("\n}\n")
+        .next()
+        .expect("the end of the function");
+    let code = strip_rust_comments(draw);
+
+    // Every arc drawn for a loading must be at the ring's own radius, exactly.
+    //
+    // The selection arc was once offset by 2px so the two loadings could not share
+    // pixels. That trades a shared circle for a visibly misaligned second ring, and
+    // the two never coexist anyway: the registration ends before the draw opens,
+    // because the draw does not count until every mark has arrived. An earlier
+    // version of this assertion only looked for the constant's name, so an offset
+    // written as a literal `+ 2.0` passed it -- a test that could not fail.
+    //
+    // So this reads the radius out of every `.arc(` call, whatever the formatting,
+    // and requires each to be the ring's own radius.
+    // The disc is the one arc that is *not* at the ring's radius; everything drawn
+    // as part of the ring -- the track, the registration sweep, the selection fill --
+    // must be.
+    let mut arcs = arc_radii(&code).into_iter();
+    assert!(
+        arcs.any(|r| r.contains("DISC_RADIUS")),
+        "the disc is still drawn at its own radius"
+    );
+    let ring_arcs: Vec<String> = arcs.collect();
+    assert!(
+        ring_arcs.len() >= 3,
+        "the ring's track and both loadings are all arcs; found {}: {ring_arcs:?}",
+        ring_arcs.len()
+    );
+    for arg in &ring_arcs {
+        assert_eq!(
+            *arg, "ring_radius",
+            "every arc on the ring must be at the ring's own radius, not `{arg}` \
+             -- an offset circle is a visibly misaligned ring"
+        );
+    }
+    assert!(
+        !code.contains("LOADING_GROWTH"),
+        "and there should be no offset constant for them at all"
+    );
+
+    // The per-finger loading is passed in as a fraction, so the mark grows into
+    // place rather than appearing at full size or snapping in.
+    assert!(
+        code.contains("if let Some(loading) = loading"),
+        "the per-finger loading must reach the drawing code as a fraction"
+    );
+    // `paint` reads it off the player, not off a flag: the fraction belongs to the
+    // finger, so each mark charges from its own touchdown.
+    assert!(
+        ui.contains(".registration(timestamp)"),
+        "and it must come from the player's own registration, in paint"
+    );
+    assert!(
+        ui.contains("flood_radius"),
+        "the flood must be a disc growing from the winner's own mark"
     );
 }
 

@@ -273,13 +273,40 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    # Only a build for master publishes. The trigger already says `branches:
-    # [master]`, so this is belt and braces -- but the trigger is one line
-    # above the job and this is the line that decides whether the live site is
-    # overwritten, and a pull request from a fork gets no token with
-    # `pages: write` either way. Being explicit here means a trigger widened
-    # later does not silently hand every branch a publish button.
-    if: github.ref == 'refs/heads/master'
+    # Only a build for master publishes, AND only in the repository that owns
+    # the site. The trigger already says `branches: [master]`, so this is belt
+    # and braces on the first half -- but the trigger is one line above the job
+    # and this is the line that decides whether the live site is overwritten, and
+    # a pull request from a fork gets no token with `pages: write` either way.
+    # Being explicit here means a trigger widened later does not silently hand
+    # every branch a publish button.
+    #
+    # The second half is the fork rule, and it is why this gate is not a bare
+    # `github.ref` test. `bot-git-ai/chwazi` is a real GitHub fork of
+    # `wdomitrz/chwazi`, and this workflow is deliberately byte-identical in
+    # both: a fork exists precisely so its history and its files can be copied,
+    # so a deploy that keys only on the branch name cannot tell the two
+    # repositories apart and tries to publish from both. Fork masters move
+    # independently -- the fork is usually ahead of its upstream -- so it would
+    # serve its own divergent copy, and it would fail to serve anything at all
+    # in the case that actually happens: a fork has no Pages site of its own
+    # until someone enables one by hand, and until then every push to fork
+    # master builds green -- the whole site check included -- and then dies at
+    # "Creating Pages deployment failed ... Ensure GitHub Pages has been
+    # enabled". A red run per push is a bad way to learn that.
+    #
+    # `github.event.repository.fork` is the property that distinguishes them, and
+    # it needs no configuration on either side: it is false for the upstream
+    # repository and true for the fork, supplied by the event itself. An earlier
+    # version of this gate used a repository Actions variable instead
+    # (`vars.PUBLISH_PAGES`), which reads as more explicit but is strictly worse
+    # here: it would have had to be set to `true` on the user's own repository,
+    # and this account holds only `pull` there, so the very setting that
+    # publishes the live site would have been one nobody but the user could
+    # make. A gate that must be configured before it works is a gate that ships
+    # as silently off, and a silently-off deploy gate on the repository that
+    # owns the site is a worse failure than a red fork run.
+    if: github.ref == 'refs/heads/master' && !github.event.repository.fork
     needs: build
     runs-on: ubuntu-latest
 

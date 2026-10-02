@@ -1249,6 +1249,67 @@ fn only_master_can_reach_the_live_site() {
         "the `deploy` job must be gated on the build being for master",
     );
 
+    // ... and it must ALSO be gated on not being a fork. This file is
+    // byte-identical in `wdomitrz/chwazi` and in its fork `bot-git-ai/chwazi`,
+    // so a gate that tests only the branch name cannot tell the two
+    // repositories apart: both have a `master`, and a push to the fork's master
+    // tries to publish a site it was never given. A fork has no Pages site of
+    // its own until someone enables one by hand, so every push to fork master
+    // builds green -- full site check included -- and then dies at "Creating
+    // Pages deployment failed ... Ensure GitHub Pages has been enabled". That is
+    // a red run per push, and it is a bad way to learn that. If Pages *were*
+    // enabled there, the fork would serve its own copy, which drifts from the
+    // published site as soon as the two masters diverge.
+    //
+    // `github.event.repository.fork` is the discriminator because it needs no
+    // configuration: it comes from the event, false upstream and true in the
+    // fork. The obvious alternative, a repository Actions variable, has the
+    // failure mode this assertion exists to prevent -- it would have to be set
+    // on the *upstream* repository to publish, and no account but the user's
+    // can do that, so the gate would ship as silently off on the one
+    // repository where it matters. A gate that must be configured before it
+    // works is a gate that ships silently off.
+    //
+    // The gate is read out of the live text, with comments stripped. The
+    // comment block above the `if:` names both halves of the condition while
+    // explaining it, so an assertion over the raw file would be satisfied by
+    // that comment alone, with the clause deleted. That is not hypothetical: it
+    // is the mistake the `RUSTFLAGS` assertion in `chess_clock`'s copy of this
+    // file shipped with, and it shipped.
+    let live_gate = live
+        .split("\n  deploy:")
+        .nth(1)
+        .and_then(|job| job.split_once("if:").map(|(_, after)| after))
+        .expect("the `deploy` job must have an `if:` gate");
+    // The two halves are ONE condition, not two gates. An `if:` per job would
+    // be an AND across two independent gates, and a `build`-job gate would
+    // silently stop the *build* from running on the fork rather than just its
+    // publish -- the opposite of what this is for. The fork rule must skip the
+    // deploy and let the build stand.
+    //
+    // Only the gate's own LINE is read, not the rest of the job. Taking
+    // everything after the first `if:` would let a second, sibling `if:` later
+    // in the job satisfy the clause on its own, which is precisely the
+    // two-independent-gates shape this is meant to rule out -- and it reads as
+    // a working gate until the two disagree.
+    let gate_line = live_gate
+        .lines()
+        .next()
+        .expect("the `if:` gate must be a line of its own");
+    assert!(
+        gate_line.contains("!github.event.repository.fork"),
+        "the `deploy` job must be gated on `!github.event.repository.fork`; this workflow is \
+         byte-identical in the fork `bot-git-ai/chwazi`, so a branch-name-only gate publishes \
+         from the fork too -- failing with 'Ensure GitHub Pages has been enabled' until Pages is \
+         enabled there, and serving a divergent copy afterwards",
+    );
+    assert!(
+        gate_line.contains("github.ref == 'refs/heads/master'"),
+        "the fork rule must extend the master gate, not replace it: `deploy` must be one `if:` \
+         testing both `github.ref` and `github.event.repository.fork` on the same line, not two \
+         independent gates",
+    );
+
     // And the permissions that can publish must be scoped to that job rather
     // than granted workflow-wide, so a build step or a third-party action added
     // later cannot spend them.

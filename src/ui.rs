@@ -263,24 +263,20 @@ fn paint(
     let pulse = chooser::pulse_scale(timestamp, start_time);
 
     if let Some(winner) = app.chosen() {
-        if let Some(front) = app.flood_radius(timestamp, width, height) {
-            // The winner's colour floods OUTWARD as a disc centred on the winner.
+        if let Some(hole) = app.flood_hole(timestamp, width, height) {
+            // A circle around the winner, filled with his colour everywhere OUTSIDE
+            // it, and its radius coming in.
             //
-            // Measured by probing out from the winner in eight directions every
-            // frame: south 248 CSS px at 5.000s, north 236 at 5.008s, west 175 at
-            // 5.017s, east 192 at 5.025s. They advance together, a few milliseconds
-            // apart, which is a disc drawn as a ring of pixels -- not a wipe, which
-            // would make north arrive first and the rest together.
-            //
-            // The hole is the measured black annulus, 104 CSS px to its outer edge,
-            // and it is a separate number from the front. Drawn as the front's own
-            // geometry the two would meet, and an even-odd fill of a rectangle minus
-            // a circle of equal radius cancels to nothing, so the screen would go
-            // black exactly when it should be solid colour.
+            // It is drawn as a hole rather than as a growing disc, which is the
+            // difference between the two shapes: a disc growing outwards starts at
+            // nothing and has to cross the screen, while a hole closing in starts by
+            // covering the screen and has only the middle left to take. Measured, the
+            // un-flooded radius around the winner is 242.7 CSS px while the flood is
+            // still only 2% of the screen, and then comes in to 124.8.
             match web_sys::Path2d::new() {
                 Ok(path) => {
                     path.rect(0.0, 0.0, width, height);
-                    if path.arc(winner.x, winner.y, front, 0.0, TWO_PI).is_ok() {
+                    if path.arc(winner.x, winner.y, hole, 0.0, TWO_PI).is_ok() {
                         context.set_fill_style_str(&winner.color_of());
                         context.fill_with_path_2d_and_winding(
                             &path,
@@ -386,39 +382,51 @@ fn draw_player(
     // The loading sweep, from the fixed origin round as far as it has got. It ends
     // at the origin rather than starting there, so its tail stays pinned to 7:30 and
     // the leading edge is the thing that travels.
-    let sweep = loading
-        .map(|t| (origin - TWO_PI * t, t))
-        .or(draw.map(|t| (origin - TWO_PI * t, t)));
-    if let Some((from, _)) = sweep {
+    // The finished ring, in the player's colour darkened to 0.77. It is drawn
+    // whenever the ring is not mid-sweep -- which is to say, the whole time between
+    // the two loadings, and for ever after.
+    let draw_ring = |from: f64, to: f64, style: &str| {
         context.begin_path();
         if context
-            .arc(player.x, player.y, ring_radius, from, origin)
+            .arc(player.x, player.y, ring_radius, from, to)
             .is_ok()
         {
             context.set_line_width(chooser::ARC_WIDTH * scale);
-            // The player's own colour: a fixed pale colour is orange against every
-            // hue that is not orange, so the sweep appeared to belong to whichever
-            // player happened to be orange.
-            context.set_stroke_style_str(&colour);
+            context.set_stroke_style_str(style);
             context.stroke();
         }
+    };
+    let ring = player.ring_color();
+    let loaded = player.loading_color();
+
+    if let Some(t) = loading {
+        // The first loading: the ring arrives, slightly brighter than it will rest,
+        // sweeping from the fixed origin round to closed.
+        //
+        // "Slightly brighter" is the point. The band is the ring's own, so the only
+        // thing that changes when the load ends is the ring settling from the
+        // loading tint to its resting one -- and it settles in the same place, so
+        // nothing can appear to vanish.
+        draw_ring(origin - TWO_PI * t, origin, &loaded);
         return;
     }
 
-    // Loaded: the full ring, in the player's colour darkened to 0.77.
-    context.begin_path();
-    if context
-        .arc(player.x, player.y, ring_radius, 0.0, TWO_PI)
-        .is_ok()
-    {
-        context.set_line_width(chooser::ARC_WIDTH * scale);
-        // Bound to a local: the colour is a `String` built per frame, and passing the
-        // temporary straight into the call borrows one that is dropped before the
-        // browser has finished reading it.
-        let ring = player.ring_color();
-        context.set_stroke_style_str(&ring);
-        context.stroke();
+    if let Some(t) = draw {
+        // The second loading: it *covers* the ring the first one loaded, rather
+        // than being a second sweep that makes the loaded ring disappear and then
+        // loads again from nothing.
+        //
+        // So the resting ring is already drawn underneath at full darkness, and this
+        // fills the band in from the origin round to `t` in the player's own colour
+        // at full strength. The covered part keeps the ring's own tint underneath,
+        // so the difference between the two is a colour, not a length.
+        draw_ring(0.0, TWO_PI, &ring);
+        draw_ring(origin - TWO_PI * t, origin, &colour);
+        return;
     }
+
+    // Loaded and no draw running: the ring at rest.
+    draw_ring(0.0, TWO_PI, &ring);
 }
 
 /// One unbiased index into `len` players.

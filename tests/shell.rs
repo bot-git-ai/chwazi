@@ -627,20 +627,23 @@ fn the_mark_is_three_bands_in_measured_order() {
         fills <= 1,
         "only the disc is filled; the dot was a second fill, and there are {fills}"
     );
-    // Draw order: the disc first, then the ring -- and there is nothing else. The
-    // sweep *is* the ring, so there is no track under it and no second ring above.
+    // Draw order: the disc first, then one radius on which the ring is drawn in
+    // whichever of its three states is current. The loading structure is pinned in
+    // `the_two_loadings_are_different_gestures`.
     let disc = draw
         .find("DISC_RADIUS * scale * arrived")
         .expect("the disc");
-    let ring = draw.find("RING_STROKE_RADIUS * scale").expect("the ring");
-    let sweep = draw
-        .find("player.y, ring_radius, from, origin")
-        .expect("the sweep, which is the ring");
-    let finished = draw.find("player.ring_color()").expect("the finished ring");
+    let ring = draw
+        .find("RING_STROKE_RADIUS * scale")
+        .expect("the ring radius");
+    let sweep = draw.find("let draw_ring =").expect("the ring, drawn");
+    let finished = draw
+        .find("player.ring_color()")
+        .expect("the resting ring's tint");
     assert!(
         disc < ring && ring < sweep && sweep < finished,
-        "draw order must be disc ({disc}), ring radius ({ring}), sweep ({sweep}), \
-         finished ring ({finished})"
+        "draw order must be disc ({disc}), ring radius ({ring}), the ring ({sweep}), \
+         its colours ({finished})"
     );
 
     // The ring is stroked at the band's *centreline*, at its own width.
@@ -713,16 +716,17 @@ fn the_mark_is_three_bands_in_measured_order() {
             "{fixed} is a fixed pale colour; the loadings must use the player's own"
         );
     }
-    // Both loadings are now the same sweep in the player's own colour, so there is
-    // one colour to check: it must be the player's, and it must reach the canvas.
+    // Both loadings ask the player for its own colours: the registration draws the
+    // ring slightly brighter than it will rest, and the draw window covers that ring
+    // in the player's colour at full strength. A fixed pale colour would be orange
+    // against every hue that is not orange.
     assert!(
-        code.contains("set_stroke_style_str(&colour)"),
-        "the sweep must be the player's own colour, so it belongs to the finger \
-         that is loading rather than to whichever player happened to be orange"
+        code.contains("player.loading_color()") && code.contains("player.ring_color()"),
+        "both loadings must take their colours from the player"
     );
     assert!(
-        !code.contains("loading_color"),
-        "and there is no separate lifted colour for the loadings any more"
+        !code.contains("DOT_COLOUR"),
+        "and neither may use the app's fixed pale colour"
     );
 }
 #[test]
@@ -749,15 +753,15 @@ fn the_mark_colours_are_measured() {
 }
 
 #[test]
-fn a_mark_is_a_disc_and_then_the_ring_itself_loads() {
-    // A mark is a disc, and while it loads, part of a ring. Not a disc wearing a
-    // finished ring with a second ring outside it sweeping to show progress: that is
-    // two rings and a disc, and the previous build drew exactly that.
+fn the_two_loadings_are_different_gestures() {
+    // A finger lands: the ring arrives, slightly brighter than it will rest, and
+    // settles in place. That is the first loading.
     //
-    // The ring *is* the loading, in both of them. That is what makes the ring unable
-    // to "flip back" at the end of the load -- there is no pale overlay painted over
-    // it to be revealed when the sweep completes -- and it is what lets the selection
-    // loading be the same shape finishing its sweep rather than a separate thing.
+    // The draw window: the ring the first loading left behind is *covered* in the
+    // player's own colour, from the origin round. It is not a second sweep that
+    // makes the loaded ring disappear and then loads it again from nothing -- the
+    // difference between the two stages is a colour filling the band, not a length
+    // of arc growing.
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
     let draw = ui
         .split("fn draw_player(")
@@ -767,41 +771,37 @@ fn a_mark_is_a_disc_and_then_the_ring_itself_loads() {
         .next()
         .expect("the end of the function");
     let code = strip_rust_comments(draw);
-
-    // There is no band of its own for a loading sweep: one band, the ring's, and
-    // both loadings are drawn on it.
-    assert!(
-        !code.contains("LOADING_ARC_GROWTH"),
-        "the loadings must not have a band of their own outside the ring"
-    );
-    assert_eq!(
-        code.matches("player.y, ring_radius, from, origin").count(),
-        1,
-        "the sweep is drawn on the ring's own radius"
-    );
-    // The sweep and the finished ring are the same circle in the same place: one
-    // shape that changes, not two shapes.
-    assert_eq!(
-        code.matches("player.y, ring_radius").count(),
-        2,
-        "the sweep and the ring are two draws on one radius, not two radii"
-    );
-    // Both loadings drive the one sweep, and the ring is only drawn complete when
-    // neither is running -- so the sweep cannot be revealed as a flash when it ends.
-    // Normalised first, because `cargo fmt` is free to wrap these across lines and a
-    // test that fails on formatting is a test that gets "fixed" by changing the code.
     let flat: String = code.split_whitespace().collect();
-    for driver in ["loading", "draw"] {
-        assert!(
-            flat.contains(&format!("{driver}.map(|t|(origin-TWO_PI*t,t))")),
-            "the registration and the selection must both drive the one sweep: \
-             `{driver}` does not"
-        );
-    }
+
+    // The first loading draws the loading tint, the second draws the resting ring
+    // UNDERNEATH and the player's colour ON TOP of it. The underneath ring is what
+    // makes it a covering rather than a re-sweep: without it the band's own tint
+    // would vanish and be re-loaded.
     assert!(
-        flat.contains("ifletSome((from,_))=sweep") && flat.contains("return;"),
-        "and the ring is only drawn finished once neither is running, so the sweep \
-         cannot be revealed as a flash when it ends"
+        flat.contains("ifletSome(t)=loading{")
+            && flat.contains("draw_ring(origin-TWO_PI*t,origin,&loaded)"),
+        "the first loading sweeps the ring in its loading tint"
+    );
+    assert!(
+        flat.contains("ifletSome(t)=draw{draw_ring(0.0,TWO_PI,&ring);")
+            && flat.contains("draw_ring(origin-TWO_PI*t,origin,&colour)"),
+        "the second loading must draw the resting ring first and then cover it"
+    );
+    // Order matters: the resting ring is laid down before the fill that covers it.
+    let under = flat
+        .find("draw_ring(0.0,TWO_PI,&ring);")
+        .expect("the resting ring");
+    let over = flat
+        .find("draw_ring(origin-TWO_PI*t,origin,&colour)")
+        .expect("the fill");
+    assert!(
+        under < over,
+        "the ring must be drawn before the colour covers it"
+    );
+    // And the loading tint is lighter than the resting ring, or "brighter" is a lie.
+    assert!(
+        flat.contains("&loaded") && flat.contains("&ring") && flat.contains("&colour"),
+        "three distinct colours: the loading tint, the resting ring, and the fill"
     );
 }
 

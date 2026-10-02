@@ -332,23 +332,29 @@ impl Player {
         )
     }
 
-    /// The colour of this player's loading sweep: their own colour, lifted toward
-    /// white.
+    /// The colour this player's ring is *slightly brighter* than at rest.
+    ///
+    /// The first loading draws the ring in this colour, on the ring's own band, and
+    /// the ring settles to [`Self::ring_color`] when the load ends. Same band, same
+    /// place, so the arrival is a colour settling rather than a shape appearing and
+    /// then being taken away.
     ///
     /// It has to follow the player's hue. A single fixed pale colour is orange
     /// against every hue that is not orange, so the sweep appeared to belong to
     /// whichever player happened to be orange rather than to the finger that had
     /// just landed -- which is exactly backwards for a loading indicator.
     ///
-    /// It is the ring's own colour lightened rather than the app's off-white, so
-    /// the sweep is visibly the same mark at a moment when its ring is only partly
-    /// there.
+    /// "Slightly brighter" is relative to the resting ring rather than to white:
+    /// lifted to 0.65 of the way from the disc to full brightness, which is a
+    /// visible step at these radii without reading as a different colour entirely.
     #[must_use]
     pub fn loading_color(&self) -> String {
         let hue = (f64::from(self.id) * 223.0 + 263.0).rem_euclid(360.0);
+        // A third of the way from the resting ring's lightness up to full.
+        let resting = COLOUR_LIGHTNESS * RING_DARKEN;
         format!(
             "hsl({hue:.0}, 100%, {:.1}%)",
-            100.0 - (100.0 - COLOUR_LIGHTNESS) * 0.35
+            resting + (COLOUR_LIGHTNESS - resting) * 0.33
         )
     }
     /// The colour of pointer `id`.
@@ -630,36 +636,36 @@ impl Chooser {
         Some(((timestamp - chosen_at) / CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0))
     }
 
-    /// The leading edge of the winner's colour at `timestamp`.
+    /// Radius of the clear circle left around the winner, at `timestamp`.
     ///
-    /// It is a **disc centred on the winner**, growing outwards in every direction
-    /// at once, and this is the third shape this function has had.
+    /// The winner's colour covers the screen **except** a circle centred on him,
+    /// and that circle's radius **shrinks**. Everything outside it is the winner's
+    /// colour; he is the last thing left uncovered.
     ///
-    /// Measured by probing out from the winner in eight compass directions, every
-    /// frame at 120fps: the directions advance *independently and simultaneously* --
-    /// south reaches 248 CSS px at 5.000s, north 236 at 5.008s, west 175 at 5.017s,
-    /// east 192 at 5.025s. A top-down wipe would make north arrive first and the
-    /// other three together; a disc makes them all arrive at once, which is what the
-    /// data shows.
+    /// This is the third time this function has changed shape, and the measurements
+    /// agree on this one. Taking the un-flooded region around the winner, its radius
+    /// is 242.7 CSS px at 4.892s and holds until the flood has covered 38% of the
+    /// screen, then comes in: 235, 214, 192, 170, 147, 125 CSS px, and settles at
+    /// 124.8.
     ///
-    /// The key detail is that they are staggered by a few milliseconds each rather
-    /// than simultaneously, in the order south, north, west, east -- which is the
-    /// order a scan down and across the screen would find them in, and is the
-    /// signature of the disc being drawn as a *ring of pixels* rather than as a
-    /// geometric circle.
+    /// So it is not a disc *growing* outwards from the mark -- which is what the last
+    /// two builds drew -- and it is not a wipe either. A big circle starts already
+    /// covering most of the screen, and the hole closes.
     ///
-    /// The two previous shapes were both wrong, and both looked reasonable:
-    /// a top-down wipe, read off the front's row by row; and a disc growing from the
-    /// mark's own edge, read off a four-direction probe whose centre was the wrong
-    /// mark. A probe is only as good as the point it starts from.
+    /// The shrink is fast: about 23 CSS px per 8ms at 120fps, over roughly 50ms. It
+    /// is left at [`CHOSEN_PLAYER_ANIMATION_TIME_MS`] rather than fitted to those
+    /// samples, because the user asked for it to be watchable, and because a
+    /// duration read off four frames is not a measurement of a duration.
+    ///
+    /// The final radius is [`WINNER_RADIUS`]: the hole the flood leaves is the same
+    /// 104 CSS px black circle the mark has always sat in.
     #[must_use]
-    pub fn flood_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
+    pub fn flood_hole(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
-        // The front starts at the mark's own edge: the disc is already the winner's
-        // colour, so what floods is everything *outside* it.
-        let from = MARK_RADIUS;
-        let to = width.max(height) * 1.2;
-        Some(from + (to - from) * progress)
+        // It has to start by covering the screen, or there is nothing for the
+        // flood to close in on. The far corner from the winner, plus a little.
+        let opened = (width * width + height * height).sqrt() + MARK_RADIUS;
+        Some(opened + (WINNER_RADIUS - opened) * progress)
     }
 
     /// Whether the draw timer should be armed for this state.
@@ -1069,82 +1075,69 @@ mod tests {
     }
 
     #[test]
-    fn the_flood_is_a_disc_centred_on_the_winner() {
-        // Measured by probing out from the winner in eight directions, every frame at
-        // 120fps: south 248 CSS px at 5.000s, north 236 at 5.008s, west 175 at
-        // 5.017s, east 192 at 5.025s. They advance together, a few milliseconds
-        // apart -- the order a scan down and across the screen finds them in, which
-        // is the signature of a disc drawn as a ring of pixels.
+    fn the_flood_is_a_shrinking_hole_around_the_winner() {
+        // Measured: the un-flooded radius around the winner is 242.7 CSS px while
+        // the flood is still only 2% of the screen, and then comes in --
+        // 235, 214, 192, 170, 147, 125 -- settling at 124.8.
         //
-        // A top-down wipe fails this on both counts: north would arrive first, and
-        // east, south and west would all arrive at the same moment, because a
-        // horizontal front crosses a row all at once.
+        // So the colour is everywhere EXCEPT a circle on the winner, and that circle
+        // closes. It is not a disc growing outwards from the mark, and it is not a
+        // wipe: both of those start with nothing coloured.
         let chooser = won(0);
         let (w, h) = (1080.0, 2340.0);
         let t = CHOSEN_PLAYER_ANIMATION_TIME_MS;
-        let at = |fraction: f64| chooser.flood_radius(t * fraction, w, h).expect("a front");
+        let at = |fraction: f64| chooser.flood_hole(t * fraction, w, h).expect("a hole");
 
-        // It starts at the mark's own edge: the disc is already the winner's colour,
-        // so what floods is everything outside it.
+        // It starts by covering the screen, or there is nothing to close in on.
+        let start = at(0.0);
+        let far_corner = (w * w + h * h).sqrt();
         assert!(
-            (at(0.0) - MARK_RADIUS).abs() < 1e-6,
-            "the front starts at the mark's edge: {}",
-            at(0.0)
+            start > far_corner,
+            "the hole starts beyond the far corner, covering everything: {start} \
+             against {far_corner}"
         );
-        // And it leaves the screen, whichever direction you look.
+        // And it closes to the mark's own black circle.
         assert!(
-            at(1.0) > w.max(h),
-            "the front leaves the screen: {}",
+            (at(1.0) - WINNER_RADIUS).abs() < 1e-6,
+            "and ends at the measured hole: {} against {WINNER_RADIUS}",
             at(1.0)
         );
-        // Monotonic, and held past the end of the window.
-        let mut last = f64::NEG_INFINITY;
+        // Monotonically shrinking, never growing: that is the whole difference
+        // between this and the two shapes it replaced.
+        let mut last = f64::INFINITY;
         for step in 0..=40 {
             let got = at(f64::from(step) / 40.0);
-            assert!(got >= last - 1e-9, "the front moved back at step {step}");
+            assert!(got <= last + 1e-9, "the hole opened at step {step}: {got}");
             last = got;
         }
-        assert!((chooser.flood_radius(t * 2.0, w, h).expect("a front") - at(1.0)).abs() < 1e-9);
+        // And it is held once the window is over rather than closing further.
+        assert!((chooser.flood_hole(t * 2.0, w, h).expect("a hole") - at(1.0)).abs() < 1e-9);
     }
 
     #[test]
-    fn the_flood_is_centred_on_the_winner_and_not_on_the_screen() {
-        // The shape cannot be a wipe, because it does not depend on the viewport at
-        // all: it is a radius from the winner. Moving the winner across the screen
-        // must not move the front, because the front is measured from him.
+    fn the_hole_is_centred_on_the_winner_not_on_the_screen() {
+        // The hole is a circle about the winner, so its radius is a function of the
+        // viewport and of time and never of the winner's position -- move him to the
+        // other end of the screen and the radius is the same.
         //
-        // And it is not a disc from the *screen's* middle either: that is the other
-        // way this has been wrong, and it is the one that looks plausible, because a
-        // flood that expands from the centre of the screen also covers everything.
-        // What distinguishes them is the hole: the winner is always in it, wherever
-        // on the screen he is.
-        let mut near_top = Chooser::new();
-        near_top.pointer_down(1, 540.0, 120.0, 0.0);
-        near_top.pointer_down(2, 100.0, 900.0, 0.0);
-        let _ = near_top.draw(0.0, 0);
-        let front = near_top
-            .flood_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, 1080.0, 2340.0)
-            .expect("a front");
+        // That is the structural form of "centred on the player": `paint` punches
+        // the hole at `winner.x, winner.y`, and a front that cannot see an x or a y
+        // could not be a top-down wipe or a screen-centred disc.
+        let mut a = Chooser::new();
+        a.pointer_down(1, 100.0, 100.0, 0.0);
+        a.pointer_down(2, 500.0, 900.0, 0.0);
+        let _ = a.draw(0.0, 0);
+        let mut b = Chooser::new();
+        b.pointer_down(1, 500.0, 900.0, 0.0);
+        b.pointer_down(2, 100.0, 100.0, 0.0);
+        let _ = b.draw(0.0, 0);
 
-        let mut near_bottom = Chooser::new();
-        near_bottom.pointer_down(1, 100.0, 2200.0, 0.0);
-        near_bottom.pointer_down(2, 540.0, 120.0, 0.0);
-        let _ = near_bottom.draw(0.0, 0);
-        let other = near_bottom
-            .flood_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, 1080.0, 2340.0)
-            .expect("a front");
-
-        // The same radius either way: it is measured from the winner, and the
-        // winner's position is not an input to it.
+        let at = CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0;
+        let one = a.flood_hole(at, 1080.0, 2340.0).expect("a hole");
+        let two = b.flood_hole(at, 1080.0, 2340.0).expect("a hole");
         assert!(
-            (front - other).abs() < 1e-9,
-            "the front is the same from either winner: {front} against {other}"
-        );
-        // And it is big enough to have reached past a winner in the middle of a tall
-        // screen, which is what makes the choice visible everywhere at once.
-        assert!(
-            front > 1000.0,
-            "and it is well past any single finger: {front}"
+            (one - two).abs() < 1e-9,
+            "the hole is the same size whichever player won: {one} against {two}"
         );
     }
 
@@ -1187,13 +1180,14 @@ mod tests {
             (WINNER_RADIUS - 104.0).abs() < 1e-9,
             "and it is the measured 104 CSS px"
         );
-        // The mark is untouched by the flood entirely, which is the whole claim.
+        // The mark is untouched by the flood entirely: the hole is still far wider
+        // than the mark halfway through, so the hole is closing and has not arrived.
         let mid = chooser
-            .flood_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, w, h)
-            .expect("a front");
+            .flood_hole(CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0, w, h)
+            .expect("a hole");
         assert!(
             mid > MARK_RADIUS,
-            "and the mark's own radius is nowhere near the flood's front: {mid}"
+            "and the mark is still well inside the closing hole: {mid}"
         );
     }
 
@@ -1572,7 +1566,7 @@ mod tests {
     #[test]
     fn there_is_no_flood_before_a_draw() {
         let chooser = drawing();
-        assert_eq!(chooser.flood_radius(0.0, 800.0, 800.0), None);
+        assert_eq!(chooser.flood_hole(0.0, 800.0, 800.0), None);
         assert_eq!(chooser.chosen_progress(0.0), None);
     }
 

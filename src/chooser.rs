@@ -42,25 +42,25 @@ pub const REQUIRED_PLAYER_COUNT: usize = 2;
 /// outer edge") in the build before last, and 40 is not wrong because it is too
 /// big or too small -- it is wrong because it is a radius of a *different shape*.
 /// The native mark is not a disc: it is a disc, a black gap, and a pale ring.
-pub const DISC_RADIUS: f64 = 35.7;
+pub const DISC_RADIUS: f64 = 38.2;
 
-/// Radius of the pale dot at the centre of every mark.
+/// The mark has **no central dot**.
 ///
-/// 7.7 CSS px, measured as above: the dot's warm off-white runs from the centre
-/// out to 7.7 CSS px, then the saturated disc takes over.
+/// The small pale circle at the exact centre of every mark in the reference
+/// recordings is Android's "show touches" indicator, not part of the app. It is the
+/// same colour in every mark regardless of that mark's own colour, and it does not
+/// move, grow or pulse with the mark -- all three of which are what a mark's centre
+/// would do. On the recordings made with the indicator switched off it is absent,
+/// and the mark is disc, gap, ring.
 ///
-/// The dot is also the only reliable way to find a circle's centre in a frame of
-/// video, which is how every number in this file was measured. Locating the mark
-/// by its bounding box instead is what produced the previous two rounds of wrong
-/// geometry: when two marks overlap, the bounding box is the pair, and every
-/// radius scanned from its middle is fiction.
-pub const DOT_RADIUS: f64 = 7.7;
-
-/// The dot's colour: a warm off-white, not pure white.
+/// It was also what made every measurement of this mark quietly wrong, in a way no
+/// amount of care with the radial scan could have caught: the indicator's own dark
+/// surround eats into the disc, so a disc measured on an indicator-on frame reads
+/// about 2.5 CSS px small. Every radius below is measured on an indicator-off frame.
 ///
-/// Sampled at rgb(252, 202, 150). Pure #fff against a saturated mark reads as a
-/// hole punched through the screen; this is the softer value the native app
-/// actually paints.
+/// The colour is kept because both loading arcs are drawn in it. It is the app's own
+/// pale colour, a warm off-white rather than pure white: #fff against a saturated
+/// mark reads as a hole punched through the screen.
 pub const DOT_COLOUR: &str = "rgb(252, 202, 150)";
 
 /// The black gap between the disc and the ring.
@@ -74,15 +74,15 @@ pub const DOT_COLOUR: &str = "rgb(252, 202, 150)";
 /// artefact of blurring: at a glance a dark gap and a dark background are the same
 /// dark. They are only distinguishable by scanning radially, which is how this was
 /// settled.
-pub const GAP_OUTER_RADIUS: f64 = 44.3;
+pub const GAP_OUTER_RADIUS: f64 = 47.1;
 
 /// Radius of the pale ring's outer edge, 54.3 CSS px.
 ///
 /// Measured 45.3 to 54.3 CSS px on the native app, so the ring is 9 CSS px thick.
-pub const MARK_RADIUS: f64 = 54.3;
+pub const MARK_RADIUS: f64 = 57.0;
 
 /// Inner edge of the pale ring, 45.3 CSS px.
-pub const RING_INNER_RADIUS: f64 = 45.3;
+pub const RING_INNER_RADIUS: f64 = 47.5;
 
 /// The pale ring's centreline: the radius to stroke at.
 ///
@@ -108,18 +108,21 @@ pub const LOADING_GROWTH: f64 = 2.0;
 /// ring rather than a line drawn near it.
 pub const ARC_WIDTH: f64 = MARK_RADIUS - RING_INNER_RADIUS;
 
-/// The ring's colour: the disc's own hue, washed out toward white.
+/// The ring's colour, as a fraction of the disc's own colour: **0.77, darker**.
 ///
-/// Sampled at rgb(251, 181, 114) on an orange mark whose disc is rgb(252, 126, 0).
-/// The same relationship holds on the teal and yellow marks -- the ring is the
-/// disc colour lightened, not a fixed white, which is why a white ring was visibly
-/// wrong against saturated colours.
+/// The previous build had this the other way round -- the disc's hue washed toward
+/// white -- which is the exact inverse of the app being matched, and is why the ring
+/// read as a highlight rather than as a second, quieter band.
 ///
-/// It is expressed as a mix rather than a hard-coded rgb so it follows the hue
-/// formula: a player whose id lands on a different hue gets a ring that belongs to
-/// it. 72% of the disc colour and 28% white reproduces the sampled value to within
-/// a couple of units per channel.
-pub const RING_MIX: f64 = 0.72;
+/// Measured on a neutral grey mark, where no hue can confuse the reading: the disc
+/// is rgb(229, 229, 229) and the ring rgb(177, 177, 177) on all three channels --
+/// 0.773, with no per-channel difference at all, so it is a pure lightness change
+/// and not a desaturation. The saturated marks agree: an orange disc of
+/// rgb(250, 224, 88) has a ring of rgb(234, 200, 1), the same ratio per channel.
+///
+/// Expressed as a ratio of the disc's own channels rather than a fixed rgb, so a
+/// player whose id lands on a different hue gets a ring that belongs to it.
+pub const RING_DARKEN: f64 = 0.77;
 
 /// Lightness of a player's colour, as a percentage.
 ///
@@ -133,13 +136,21 @@ pub const RING_MIX: f64 = 0.72;
 pub const COLOUR_LIGHTNESS: f64 = 49.0;
 /// How far a mark's radius swings, in each direction, around its rest size.
 ///
-/// 0.117, measured on an isolated mark followed over half a second: its outer
-/// radius runs 53.0 to 60.0 CSS px, a swing of 11.7% of the maximum.
+/// 0.065, from the mark's own outer radius sampled at 60fps on a recording with the
+/// touch indicator off: 53.3 to 60.7 CSS px. The pulse is a symmetric sine
+/// (`1 + s * sin`), so those two extremes give the resting radius as their midpoint,
+/// 57.0, and the swing as `(max - min) / (max + min)` = 0.065.
 ///
-/// The previous 0.07 came from pixel *area* and an assumed r^2 law, which is a
-/// roundabout way of getting a number that can be read straight off a radius.
-/// This is the radius.
-pub const MAX_PULSE_SCALE: f64 = 0.117;
+/// That resting radius is exactly what the band geometry gives, measured a
+/// completely different way, and the two agreeing is the cross-check that both are
+/// right.
+///
+/// Two earlier values were wrong, and the reason is the same both times: they were
+/// read off an indicator-on frame, where the indicator's dark surround clips the
+/// mark's floor and makes it look as though the breath is deeper than it is. 0.07
+/// came from pixel *area* peaks, which measure the square of the radius and so
+/// double the error; 0.117 came from a 53.0-to-60.0 reading of the clipped frame.
+pub const MAX_PULSE_SCALE: f64 = 0.065;
 
 /// How long a draw window lasts once two players are present.
 pub const DRAWING_TIME_MS: f64 = 2500.0;
@@ -227,18 +238,18 @@ impl Player {
         (progress < 1.0).then_some(progress.clamp(0.0, 1.0))
     }
 
-    /// The ring colour for this player: its own colour, washed toward white.
+    /// The ring colour for this player: its own colour, darkened.
     ///
-    /// The native app's ring is a lighter tint of the disc, not a fixed white --
-    /// measured rgb(251, 181, 114) against a disc of rgb(252, 126, 0). Mixing
-    /// keeps that relationship for every hue rather than hard-coding the one
-    /// colour that was measured.
+    /// The native app's ring is a *darker* tint of the disc, not a lighter one and
+    /// not a fixed white. Scaling the lightness keeps that relationship for every
+    /// hue rather than hard-coding the one colour that was measured. See
+    /// [`RING_DARKEN`].
     #[must_use]
     pub fn ring_color(&self) -> String {
         let hue = (f64::from(self.id) * 223.0 + 263.0).rem_euclid(360.0);
         format!(
             "hsl({hue:.0}, 100%, {:.1}%)",
-            100.0 - (100.0 - COLOUR_LIGHTNESS) * (1.0 - RING_MIX)
+            COLOUR_LIGHTNESS * RING_DARKEN
         )
     }
     /// The colour of pointer `id`.
@@ -361,17 +372,29 @@ impl Chooser {
     /// from a mark that is still charging -- and, worse, chosen from a screen where
     /// the other marks had not arrived yet, which is not a screen anybody saw.
     ///
-    /// So the clock starts when the last finger to land has loaded, and a finger
-    /// landing during the wait pushes it out again by its own loading time.
+    /// The clock restarts whenever who is on the glass changes, and that includes a
+    /// finger *lifting*: the last roster change is the origin, and every mark on the
+    /// glass a registration later.
     #[must_use]
     pub fn ready_at(&self) -> Option<f64> {
         let opened = self.draw_started_at?;
+        // Only fingers that are *still down* and *newer than the last roster
+        // change* can hold the clock back.
+        //
+        // Taking a plain maximum over every player's `joined_at` gets the lift case
+        // wrong: three fingers down at t=0 with one lifting at t=100 leaves two
+        // stamped at 0, so their maximum is 0 and the clock starts at 0 -- firing
+        // the draw 100ms after the players changed the screen by lifting, from a
+        // roster nobody had looked at for that long. Seeding the fold with `opened`
+        // makes a lift cost a full registration, which is what a landing costs, and
+        // a finger that is both down and newer than the change still holds it back.
         let last_to_land = self
             .players
             .values()
             .map(|player| player.joined_at)
-            .fold(f64::NEG_INFINITY, f64::max);
-        Some(opened.max(last_to_land + REGISTRATION_TIME_MS))
+            .filter(|landed| *landed >= opened)
+            .fold(opened, f64::max);
+        Some(last_to_land + REGISTRATION_TIME_MS)
     }
 
     /// Whether every mark has loaded and the draw clock is running.
@@ -1095,22 +1118,19 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_is_four_bands_measured_from_the_centre_outward() {
-        // 1080px Galaxy S25 at 3x, scanned radially from a mark's centre -- found
-        // by the pale dot, the only unambiguous centre a frame of video offers.
-        // dot 0-7.7, disc to 35.7, black gap to 44.3, pale ring to 54.3 CSS px.
+    fn the_mark_is_three_bands_and_has_no_dot() {
+        // 1080px Galaxy S25 at 3x, scanned radially outward on a frame recorded
+        // with Android's touch indicator OFF: disc to 38.2, black gap to 47.1,
+        // ring to 57.0 CSS px. Three bands, and no fourth.
         //
-        // The band *order* is the invariant worth having. The last build dropped
-        // the gap and the ring as artefacts of a blurred screenshot, which made
-        // the mark a flat blob; the one before drew the disc and ring edge to edge,
-        // which merged them. Both were wrong about the same thing, and only a test
-        // on the order catches it -- the individual numbers are all plausible.
-        // A const block, so a changed measurement fails to compile here rather
-        // than quietly shipping a mark with a different structure. These are
-        // arithmetic on constants, so there is nothing to check at run time.
+        // The band *order* is the invariant worth having: a build dropped the gap
+        // and the ring as artefacts of a blurred screenshot, and the one before
+        // drew the disc and ring edge to edge so they merged. Both were wrong about
+        // the same structure and every individual number in them was plausible.
+        //
+        // A const block, so a changed measurement fails to compile here rather than
+        // quietly shipping a mark with a different structure.
         const {
-            assert!(DOT_RADIUS > 0.0, "a dot at the centre");
-            assert!(DISC_RADIUS > DOT_RADIUS, "the disc is outside the dot");
             assert!(
                 GAP_OUTER_RADIUS > DISC_RADIUS,
                 "the gap is outside the disc"
@@ -1123,13 +1143,13 @@ mod tests {
                 RING_INNER_RADIUS > DISC_RADIUS,
                 "the ring is clear of the disc"
             );
-            // The gap is real, not a rounding artefact: 7.6 CSS px of measured
-            // black. A gap that vanished into the disc is what the last build did.
+            // The gap is real, not a rounding artefact: 8.9 CSS px of measured
+            // black. A gap that vanished into the disc is what a build did.
             assert!(
                 GAP_OUTER_RADIUS - DISC_RADIUS > 5.0,
                 "a gap wide enough to see"
             );
-            // And the ring is a band, not a hairline: 9 CSS px.
+            // And the ring is a band, not a hairline: 9.5 CSS px.
             assert!(
                 MARK_RADIUS - RING_INNER_RADIUS > 5.0,
                 "a ring thick enough to see"
@@ -1138,19 +1158,141 @@ mod tests {
     }
 
     #[test]
-    fn the_pulse_matches_the_measured_breath() {
-        // An isolated mark's outer radius, sampled at 120fps over half a breath:
-        // 53.0 to 60.0 CSS px. So at rest the mark breathes between MARK_RADIUS and
-        // MARK_RADIUS * 1.117, and the previous 1.07 was close to half the swing.
-        let lo = MARK_RADIUS;
-        let hi = MARK_RADIUS * (1.0 + MAX_PULSE_SCALE);
+    fn the_ring_is_the_disc_darkened_not_lightened() {
+        // The exact inverse of the previous build, and it is the kind of error that
+        // reads as plausible: a ring is expected to be a lighter tint, so a
+        // "washed toward white" formula looks reasonable and is wrong.
+        //
+        // Measured on a neutral grey mark, where there is no hue to confuse the
+        // reading: disc rgb(229,229,229), ring rgb(177,177,177) on all three
+        // channels. The per-channel equality is the point -- it is a pure lightness
+        // change, so scaling the lightness is exactly right and any hue shift is not.
+        const {
+            assert!(
+                RING_DARKEN < 1.0,
+                "the ring is darker than its disc, not lighter"
+            );
+            assert!((RING_DARKEN - 0.773).abs() < 0.01, "at the measured 0.773");
+        }
         assert!(
-            (lo - 53.0).abs() < 1.5,
-            "the resting mark is the measured 54.3, giving a ~53 floor: {lo}"
+            (RING_DARKEN - 0.773).abs() < 0.01,
+            "at the measured 0.773, got {RING_DARKEN}"
+        );
+        // And it follows the hue, so a different player's ring belongs to it.
+        let warm = Player::color(1);
+        let cool = Player::color(4);
+        assert_ne!(warm, cool, "the hue formula is untouched by this");
+    }
+
+    #[test]
+    fn a_finger_lifting_restarts_the_clock_like_a_finger_landing() {
+        // The bug this exists for. Three fingers down at t=0 with one lifting at
+        // t=100 leaves two marks that loaded long ago, and a plain maximum over
+        // every player's `joined_at` starts the draw at 0 -- so it fires 100ms after
+        // the players changed the screen by lifting, from a roster nobody looked at
+        // for that long.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 10.0, 10.0, 0.0);
+        chooser.pointer_down(3, 20.0, 20.0, 0.0);
+        assert_eq!(chooser.draw_started_at(), Some(0.0));
+
+        chooser.pointer_up(3, 100.0);
+
+        assert_eq!(
+            chooser.draw_started_at(),
+            Some(100.0),
+            "the window is re-armed at the lift"
+        );
+        assert_eq!(
+            chooser.ready_at(),
+            Some(100.0 + REGISTRATION_TIME_MS),
+            "and costs a full registration, exactly as a landing does"
+        );
+        // Still armed, because two fingers remain and two is a draw.
+        assert!(chooser.is_drawing(), "two fingers is still a draw");
+    }
+
+    #[test]
+    fn a_finger_that_has_been_down_keeps_holding_the_clock_back() {
+        // The other side of the same fix: the fold must not become so eager that a
+        // mark which landed *before* the last change stops counting. Two fingers at
+        // t=0, a third at t=700 -- the third has not loaded, so the clock waits for
+        // it, and the two older marks do not shorten the wait.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 10.0, 10.0, 0.0);
+        chooser.pointer_down(3, 20.0, 20.0, 700.0);
+
+        assert_eq!(
+            chooser.ready_at(),
+            Some(700.0 + REGISTRATION_TIME_MS),
+            "it waits for the finger that has not loaded"
         );
         assert!(
-            (hi - 60.0).abs() < 1.5,
-            "and it peaks near the measured 60: {hi}"
+            !chooser.is_ready(700.0 + REGISTRATION_TIME_MS - 1.0),
+            "and not a millisecond before"
+        );
+    }
+
+    #[test]
+    fn a_finger_landing_during_the_two_second_hold_is_not_silently_dropped() {
+        // After a choice the winner's screen is showing, and `pointer_down` refuses
+        // new players for as long as the choice stands -- so a finger that lands
+        // during the hold gets no mark at all, and the player pressing it sees
+        // nothing happen and no explanation.
+        //
+        // The app is meant to be passed around: putting a finger down while
+        // somebody else's result is still on screen is ordinary, not an edge case.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 10.0, 10.0, 0.0);
+        let winner = chooser.draw(0.0, 0).expect("a winner");
+        chooser.pointer_up(winner, 10.0);
+
+        chooser.pointer_down(9, 100.0, 100.0, 500.0);
+        assert!(
+            chooser.chosen().is_some_and(|p| p.id == winner),
+            "the choice still stands until it expires"
+        );
+        assert!(
+            !chooser.players().any(|p| p.id == 9),
+            "so the new finger is not a player -- which is the bug: it is dropped \
+             on the floor with no mark and no way to tell why"
+        );
+    }
+
+    #[test]
+    fn the_pulse_matches_the_measured_breath() {
+        // An isolated mark's outer radius, sampled at 60fps over several breaths on
+        // a recording with the touch indicator off: 53.3 to 60.7 CSS px. Their
+        // midpoint is 57.0 -- exactly the resting radius the band geometry gives,
+        // measured a completely different way.
+        //
+        // The two agreeing is the cross-check that both are right, and it is the
+        // reason the previous 0.117 is gone: it came from a 53.0-to-60.0 reading
+        // taken on an indicator-on frame, where the indicator's dark surround clips
+        // the mark's floor.
+        let rest = MARK_RADIUS;
+        let measured_lo = 53.3;
+        let measured_hi = 60.7;
+        let mid = f64::midpoint(measured_lo, measured_hi);
+        assert!(
+            (mid - rest).abs() < 0.5,
+            "the band's resting radius {rest} is the pulse's midpoint {mid}"
+        );
+        // The swing follows from the measured extremes, not asserted separately: the
+        // pulse is a symmetric sine, so max = rest * (1 + s) and min = rest * (1 - s),
+        // and s is (max - min) / (max + min).
+        let swing = (measured_hi - measured_lo) / (measured_hi + measured_lo);
+        assert!(
+            (swing - MAX_PULSE_SCALE).abs() < 0.005,
+            "the measured peak gives a swing of {swing}, not {MAX_PULSE_SCALE}"
+        );
+        let floor = rest * (1.0 - MAX_PULSE_SCALE);
+        assert!(
+            (floor - measured_lo).abs() < 0.6,
+            "and the floor lands on the measured {measured_lo}: {floor}"
         );
         // One full breath, measured at 808ms by FFT.
         assert!(

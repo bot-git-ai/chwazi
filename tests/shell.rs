@@ -38,6 +38,48 @@ fn worker() -> String {
         .expect("the committed worker template")
 }
 
+/// Rust source with every comment removed, for substring assertions.
+///
+/// A test that asserts on source text is asserting on the wrong thing if it can be
+/// satisfied by a comment. A doc comment naming a call satisfies a substring check
+/// with the call deleted, which is the failure mode that matters here: the drawing
+/// code is wasm-only and cannot be unit-tested on the host, so these tests are the
+/// only automated check it has.
+///
+/// Deliberately simple: it strips `//` to end of line and `/* ... */`, and does not
+/// try to understand string literals. A `//` inside a string would end the "comment"
+/// early and leave some real code behind, which can only make an assertion stricter,
+/// never looser.
+fn strip_rust_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for c in chars.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Tracked file names, or `None` outside a checkout.
 ///
 /// The release gate exports the candidate as a bare directory with no `.git`,
@@ -544,7 +586,7 @@ fn string_literals(source: &str) -> Vec<String> {
 /// So this checks the drawing code, not only the constants: a ring that comes back
 /// as a draw call rather than as a constant would otherwise sail straight through.
 #[test]
-fn the_mark_is_four_bands_in_measured_order() {
+fn the_mark_is_three_bands_in_measured_order() {
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
 
     // Scoped to the drawing function: `DOT_COLOUR` is referenced in more than one
@@ -557,15 +599,40 @@ fn the_mark_is_four_bands_in_measured_order() {
         .next()
         .expect("the end of the function");
 
-    let dot = draw.find("DOT_RADIUS * scale").expect("the dot");
+    // Three bands, and no dot.
+    //
+    // The dot is the important half: a small pale circle at the centre of every
+    // mark looks entirely plausible -- it is the most distinctive thing in the
+    // reference recordings, it sits at the exact centre, and a radial scan finds it
+    // first. It is Android's "show touches" indicator, not the app's. It is the same
+    // colour in every mark whatever that mark's own colour, and it does not move,
+    // grow or pulse with the mark. On an indicator-off recording it is absent.
+    //
+    // Checked on the *stripped* source, and on the drawing function rather than the
+    // whole file, for two reasons that are both about tests that cannot fail. A
+    // literal radius reintroduces the dot without the name `DOT_RADIUS` anywhere, so
+    // a name check alone lets it straight through -- which it did, the first time
+    // this assertion was written. And a doc comment naming the call satisfies a
+    // substring assertion with the call deleted.
+    let code = strip_rust_comments(draw);
+    assert!(
+        !code.contains("DOT_RADIUS"),
+        "the central dot is the phone's touch indicator, not the app's"
+    );
+    // A mark is the disc, the ring, and the two loading arcs -- four arcs and one
+    // fill. Anything else drawn on top of the disc is a fifth shape that the
+    // recordings do not contain.
+    let fills = code.matches(".fill()").count();
+    assert!(
+        fills <= 1,
+        "only the disc is filled; the dot was a second fill, and there are {fills}"
+    );
     let disc = draw.find("DISC_RADIUS * scale").expect("the disc");
     let ring = draw.find("RING_STROKE_RADIUS * scale").expect("the ring");
     let arc = draw.find("LOADING_COLOR").expect("the draw's arc");
     assert!(
-        disc < dot && dot < ring && ring < arc,
-        "draw order must be disc ({disc}), dot ({dot}), ring ({ring}), \
-         loading arc ({arc}) -- the dot sits on top of the disc, and the ring \
-         outside both"
+        disc < ring && ring < arc,
+        "draw order must be disc ({disc}), ring ({ring}), loading arc ({arc})"
     );
 
     // The ring is stroked at the band's *centreline*, at its own width.
@@ -595,17 +662,17 @@ fn the_mark_is_four_bands_in_measured_order() {
             .and_then(|n| n.trim().parse().ok())
             .unwrap_or_else(|| panic!("{name}"))
     };
-    let (disc, dot, gap, mark) = (
+    // Measured on a frame recorded with the touch indicator OFF, which is the only
+    // kind of frame these numbers are valid on.
+    let (disc, gap, mark) = (
         constant("DISC_RADIUS"),
-        constant("DOT_RADIUS"),
         constant("GAP_OUTER_RADIUS"),
         constant("MARK_RADIUS"),
     );
     for (name, got, want) in [
-        ("the disc", disc, 35.7),
-        ("the dot", dot, 7.7),
-        ("the gap's outer edge", gap, 44.3),
-        ("the mark's outer edge", mark, 54.3),
+        ("the disc", disc, 38.2),
+        ("the gap's outer edge", gap, 47.1),
+        ("the mark's outer edge", mark, 57.0),
     ] {
         assert!(
             (got - want).abs() < 0.5,
@@ -667,16 +734,28 @@ fn the_mark_is_four_bands_in_measured_order() {
         ui.contains("flood_radius"),
         "the flood must be a disc growing from the winner's own mark"
     );
+}
 
-    // The colour, measured over saturated pixels from the native recordings.
+#[test]
+fn the_mark_colours_are_measured() {
+    // The colours, measured on an indicator-off frame.
+    let chooser = std::fs::read_to_string(root().join("src/chooser.rs")).expect("chooser.rs");
+    let constant = |name: &str| -> f64 {
+        chooser
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("pub const {name}: f64 = ")))
+            .and_then(|rest| rest.split(';').next())
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_else(|| panic!("{name}"))
+    };
     let lightness = constant("COLOUR_LIGHTNESS");
     assert!(
         (lightness - 49.0).abs() < 1.0,
         "lightness is {lightness}%; the native median is 49%"
     );
     assert!(
-        chooser.contains("DOT_COLOUR") && chooser.contains("RING_MIX"),
-        "the dot's colour and the ring's mix must be the sampled ones, not guesses"
+        chooser.contains("DOT_COLOUR") && chooser.contains("RING_DARKEN"),
+        "the loadings' colour and the ring's darkening must be the sampled ones"
     );
 }
 

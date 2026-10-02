@@ -341,7 +341,7 @@ fn draw_player(
     // which is what makes it read as arriving rather than as fading in.
     let scale = pulse * loading.unwrap_or(1.0);
 
-    // The saturated disc, first, because the dot is drawn on top of it.
+    // The saturated disc.
     context.begin_path();
     if let Err(error) = context.arc(
         player.x,
@@ -356,28 +356,12 @@ fn draw_player(
     context.set_fill_style_str(&colour);
     context.fill();
 
-    // The pale dot at the centre, on top of the disc. It is what makes the mark
-    // read as a bead of light rather than a flat blob, and on a saturated colour it
-    // is the only part of the mark that does not move when the pulse does.
-    if scale > 0.0 {
-        context.begin_path();
-        if context
-            .arc(player.x, player.y, chooser::DOT_RADIUS * scale, 0.0, TWO_PI)
-            .is_ok()
-        {
-            context.set_fill_style_str(chooser::DOT_COLOUR);
-            context.fill();
-        }
-    }
-
-    // The pale ring, in the ring's own band: 45.3 to 54.3 CSS px, which is 9 wide.
-    //
-    // Stroked at the band's *centreline*, 49.8, not at its outer edge. A stroke is
-    // centred on the path it follows, so stroking at 54.3 laid the band from 49.8
-    // to 58.8: 4.5px of ring outside the measured edge, and 4.5px of the gap left
-    // showing as a second black band inside the first. That is what a too-large gap
-    // looks like, and it is invisible in the constants -- both numbers are correct,
-    // and only the arithmetic between them was wrong.
+    // The ring's centreline: the radius it is stroked at. A stroke is centred on the
+    // path it follows, so this has to be the *middle* of the band -- stroking at the
+    // outer edge would lay it from 52.2 to 61.7, outside the measured mark, and
+    // would leave 4.75px of the gap showing as a second black band. Every number in
+    // that is correct and only the arithmetic between them is wrong, which is why it
+    // survived a build.
     let ring_radius = chooser::RING_STROKE_RADIUS * scale;
 
     // The ring, in the ring's own band, stroked at the band's centreline.

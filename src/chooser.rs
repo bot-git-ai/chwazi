@@ -32,37 +32,76 @@ use std::collections::BTreeMap;
 /// A draw needs at least this many players. One finger cannot choose itself.
 pub const REQUIRED_PLAYER_COUNT: usize = 2;
 
-/// Radius of the whole mark, outer edge.
+/// Radius of the coloured disc, to its outer edge.
 ///
-/// 40 CSS px -- 80 across -- measured on every clean frame of every native
-/// recording, on a 1080px-wide Galaxy S25 at 3x. This is the number that was
-/// right in the last build and is unchanged here; the errors were the *structure*
-/// inside it and the colour it is filled with, not its size.
-pub const MARK_RADIUS: f64 = 40.0;
+/// 35.7 CSS px. Measured at full resolution on a 1080px-wide Galaxy S25 at 3x
+/// by locating a mark's centre from its pale dot and scanning radially outward
+/// along 720 rays: the saturated colour runs unbroken from 8.7 to 35.7 CSS px.
+///
+/// This is the number that has been wrong twice. It was 40 ("the whole mark,
+/// outer edge") in the build before last, and 40 is not wrong because it is too
+/// big or too small -- it is wrong because it is a radius of a *different shape*.
+/// The native mark is not a disc: it is a disc, a black gap, and a pale ring.
+pub const DISC_RADIUS: f64 = 35.7;
 
 /// Radius of the pale dot at the centre of every mark.
 ///
-/// Measured at 6.3 CSS px on a clean frame, about a sixth of the mark's radius.
+/// 7.7 CSS px, measured as above: the dot's warm off-white runs from the centre
+/// out to 7.7 CSS px, then the saturated disc takes over.
 ///
-/// This app has never drawn it, and it is the most distinctive thing about the
-/// native app's mark: a disc of colour with a bright centre reads as a bead of
-/// light, which on a black screen is what makes it look lit rather than flat. It is
-/// also the only reliable way to find a circle's centre in a frame of video,
-/// which is how it is measured.
-pub const DOT_RADIUS: f64 = 6.5;
+/// The dot is also the only reliable way to find a circle's centre in a frame of
+/// video, which is how every number in this file was measured. Locating the mark
+/// by its bounding box instead is what produced the previous two rounds of wrong
+/// geometry: when two marks overlap, the bounding box is the pair, and every
+/// radius scanned from its middle is fiction.
+pub const DOT_RADIUS: f64 = 7.7;
 
 /// The dot's colour: a warm off-white, not pure white.
 ///
-/// Sampled from the recording at rgb(251,242,186). Pure #fff against a saturated
-/// mark reads as a hole punched through the screen; this is the softer value the
-/// native app actually paints.
-pub const DOT_COLOUR: &str = "rgb(251, 242, 186)";
+/// Sampled at rgb(252, 202, 150). Pure #fff against a saturated mark reads as a
+/// hole punched through the screen; this is the softer value the native app
+/// actually paints.
+pub const DOT_COLOUR: &str = "rgb(252, 202, 150)";
 
-/// Width of the white arc that sweeps a mark's edge while the draw runs.
+/// The black gap between the disc and the ring.
 ///
-/// The original's 12, which is the one constant from the original app that the
-/// recordings support unchanged.
-pub const ARC_WIDTH: f64 = 12.0;
+/// 7.6 CSS px wide, from the same radial scans: disc ends at 35.7, black runs
+/// 36.7 to 44.3, and the pale ring starts at 45.3.
+///
+/// The gap is the same near-black as the background -- rgb(15, 12, 11) against a
+/// background of rgb(11, 11, 11) -- so it is the *absence* of colour between two
+/// bands rather than a shape of its own. That is why it was twice mistaken for an
+/// artefact of blurring: at a glance a dark gap and a dark background are the same
+/// dark. They are only distinguishable by scanning radially, which is how this was
+/// settled.
+pub const GAP_OUTER_RADIUS: f64 = 44.3;
+
+/// Radius of the pale ring's outer edge, 54.3 CSS px.
+///
+/// Measured 45.3 to 54.3 CSS px on the native app, so the ring is 9 CSS px thick.
+pub const MARK_RADIUS: f64 = 54.3;
+
+/// Inner edge of the pale ring, 45.3 CSS px.
+pub const RING_INNER_RADIUS: f64 = 45.3;
+
+/// The ring's colour: the disc's own hue, washed out toward white.
+///
+/// Sampled at rgb(251, 181, 114) on an orange mark whose disc is rgb(252, 126, 0).
+/// The same relationship holds on the teal and yellow marks -- the ring is the
+/// disc colour lightened, not a fixed white, which is why a white ring was visibly
+/// wrong against saturated colours.
+///
+/// It is expressed as a mix rather than a hard-coded rgb so it follows the hue
+/// formula: a player whose id lands on a different hue gets a ring that belongs to
+/// it. 72% of the disc colour and 28% white reproduces the sampled value to within
+/// a couple of units per channel.
+pub const RING_MIX: f64 = 0.72;
+
+/// How wide the arc is, as a fraction of the ring's own band.
+///
+/// The loading sweeps the ring's band, not a separate line outside it, so this
+/// scales with the mark: 9 CSS px of ring is drawn as a stroke of the same width.
+pub const ARC_WIDTH: f64 = MARK_RADIUS - RING_INNER_RADIUS;
 
 /// Lightness of a player's colour, as a percentage.
 ///
@@ -74,50 +113,62 @@ pub const ARC_WIDTH: f64 = 12.0;
 /// The hue formula is untouched: it spreads pointer ids around the wheel exactly as
 /// it always has, and this constant is the only thing that changed in `Player::color`.
 pub const COLOUR_LIGHTNESS: f64 = 49.0;
-/// How far a player circle's radius swings, in each direction, around its rest
-/// size.
+/// How far a mark's radius swings, in each direction, around its rest size.
 ///
-/// Measured, like the rest: the native circle's pixel *area* varies by 1.33:1
-/// over its breath, and area goes as the square of the radius, so the radius swings
-/// 1.15:1 -- about +-7%. The original's +-12.5% is nearly twice that, and at these
-/// smaller radii it is the difference between a mark that breathes and one that
-/// pumps.
-pub const MAX_PULSE_SCALE: f64 = 0.07;
+/// 0.117, measured on an isolated mark followed over half a second: its outer
+/// radius runs 53.0 to 60.0 CSS px, a swing of 11.7% of the maximum.
+///
+/// The previous 0.07 came from pixel *area* and an assumed r^2 law, which is a
+/// roundabout way of getting a number that can be read straight off a radius.
+/// This is the radius.
+pub const MAX_PULSE_SCALE: f64 = 0.117;
+
 /// How long a draw window lasts once two players are present.
 pub const DRAWING_TIME_MS: f64 = 2500.0;
-/// The share of the reveal during which the fill actually reaches the edges.
-///
-/// Measured: the fill is complete five frames into a six-frame animation, so half.
-/// The other half is the winner's circle resting in the middle of its own colour.
-pub const FILL_FRACTION: f64 = 0.5;
 
-/// How long the winner's circle takes to expand across the screen.
+/// How long one finger takes to load its own mark.
 ///
-/// The original spent 1000ms on this. The native app does not: at 60fps it goes
-/// from nothing to covering the screen in **100ms** -- six frames -- which is why
-/// it feels like a decision rather than a reveal to wait out. 180ms here: slow
-/// enough that the winning colour is not the very first thing you see, and fast
-/// enough that nobody is waiting for it.
-pub const CHOSEN_PLAYER_ANIMATION_TIME_MS: f64 = 180.0;
-/// One full breath of a player circle's pulse.
+/// 560ms, measured frame by frame from touchdown: the disc reaches full size at
+/// 0.87s having started at 0.75s, and the pale ring sweeps from a point to a
+/// closed circle across the same window.
 ///
-/// Measured off the same recordings: the colour's pixel area peaks at 1.07s,
-/// 2.03s, 3.03s and 4.03s, so the period is 0.99s. The original's 1500ms is half
-/// again as slow, and at that rate a circle spends most of its time near a
-/// turning point and reads as drifting rather than breathing.
-pub const SCALING_PERIOD_MS: f64 = 1000.0;
-/// Clearance between the winner's ring and the edge of the filled screen.
-pub const CHOSEN_SEPARATION: f64 = 8.0;
+/// This is the app's first of two loadings, and it is per finger rather than per
+/// draw. It is why a mark is an *event* on the glass rather than something that
+/// is simply already there.
+pub const REGISTRATION_TIME_MS: f64 = 560.0;
+
+/// How long the winning colour takes to flood the screen.
+///
+/// 150ms, measured at 120fps: the flood's leading edge is at the disc's own edge
+/// at 4.892s and the screen is covered at 5.042s.
+///
+/// The previous 180ms was a guess, and the previous 1000ms before it was the
+/// original web app's. The native app is fast enough to feel like a decision
+/// rather than a reveal to sit through.
+pub const CHOSEN_PLAYER_ANIMATION_TIME_MS: f64 = 150.0;
+
+/// One full breath of a mark's pulse.
+///
+/// 808ms, from an FFT of an isolated mark's outer radius sampled at 120fps over a
+/// full breath. The previous 1000ms was derived from pixel *area* peaks, which
+/// measure the square of the radius and so carry the same error twice.
+pub const SCALING_PERIOD_MS: f64 = 808.0;
+
+/// Radius the winner's mark takes once the flood has finished.
+///
+/// 104 CSS px, measured as the outer edge of the black annulus that separates the
+/// winner's mark from the flooded colour, sampled every 0.2s from 6.0s to 7.8s in
+/// a recording where it sits at 103.8 to 104.3.
+///
+/// This is not the winner's circle *growing* into the screen, which is how the
+/// previous build drew it and what the recording rules out: the flood's leading
+/// edge starts at the disc's own edge (35.7) and pushes outward, while this black
+/// ring is already full size when the flood completes. So the winner's mark keeps
+/// its measured size and the black ring around it opens up.
+pub const WINNER_RADIUS: f64 = 104.0;
+
 /// How long the chosen finger must be off the glass before the app resets.
 pub const RESTART_DELAY: f64 = 2000.0;
-
-/// Radius the winner's circle takes when its expansion has finished.
-///
-/// Derived from the mark rather than carried over as a literal. The original's
-/// 74.25 was its 58px outer edge plus the author's 8px of separation, scaled by
-/// the pulse's swing; the mark is 40 now, so the same intent gives this. It moves
-/// whenever the mark does, which is the only way it can be trusted.
-pub const WINNER_RADIUS: f64 = (MARK_RADIUS + CHOSEN_SEPARATION) * (1.0 + MAX_PULSE_SCALE);
 
 /// One finger on the glass.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,12 +181,42 @@ pub struct Player {
     /// When this player was chosen, if it has been.
     ///
     /// Set once, at the instant the draw ended, and never recomputed from a
-    /// later frame -- the winner's circle expands from the moment of the draw,
+    /// later frame -- the winner's mark floods from the moment of the draw,
     /// so reading a fresh timestamp each frame would restart the animation.
     pub chosen_at: Option<f64>,
+    /// When this finger landed on the glass.
+    ///
+    /// The per-finger loading is anchored to this, not to the draw window: each
+    /// mark charges from its own touchdown, so a finger that lands late does not
+    /// appear already-loaded beside marks that have been charging for a second.
+    pub joined_at: f64,
 }
 
 impl Player {
+    /// How far this player's own mark has loaded at `timestamp`, 0 to 1.
+    ///
+    /// `None` once the mark has finished loading, so a settled mark costs nothing
+    /// per frame.
+    #[must_use]
+    pub fn registration(&self, timestamp: f64) -> Option<f64> {
+        let progress = (timestamp - self.joined_at) / REGISTRATION_TIME_MS;
+        (progress < 1.0).then_some(progress.clamp(0.0, 1.0))
+    }
+
+    /// The ring colour for this player: its own colour, washed toward white.
+    ///
+    /// The native app's ring is a lighter tint of the disc, not a fixed white --
+    /// measured rgb(251, 181, 114) against a disc of rgb(252, 126, 0). Mixing
+    /// keeps that relationship for every hue rather than hard-coding the one
+    /// colour that was measured.
+    #[must_use]
+    pub fn ring_color(&self) -> String {
+        let hue = (f64::from(self.id) * 223.0 + 263.0).rem_euclid(360.0);
+        format!(
+            "hsl({hue:.0}, 100%, {:.1}%)",
+            100.0 - (100.0 - COLOUR_LIGHTNESS) * (1.0 - RING_MIX)
+        )
+    }
     /// The colour of pointer `id`.
     ///
     /// `pointerId * 223 + 263` steps the hue by 223 degrees per id, and 223 is
@@ -146,12 +227,14 @@ impl Player {
     /// The browser normalises a negative hue, so ids that go past 360 wrap
     /// through red exactly as the CSS did. Modulo is applied so the string
     /// stays inside 0..360 and does not depend on the browser doing it.
+    #[must_use]
     pub fn color(id: i32) -> String {
         let hue = (f64::from(id) * 223.0 + 263.0).rem_euclid(360.0);
         format!("hsl({hue:.0}, 100%, {COLOUR_LIGHTNESS:.0}%)")
     }
 
     /// The CSS colour this player is drawn in.
+    #[must_use]
     pub fn color_of(&self) -> String {
         Self::color(self.id)
     }
@@ -160,12 +243,14 @@ impl Player {
     ///
     /// A sine over [`SCALING_PERIOD_MS`], anchored at `start_time` so every
     /// player breathes in step.
+    #[must_use]
     pub fn pulse_scale(&self, timestamp: f64, start_time: f64) -> f64 {
         pulse_scale(timestamp, start_time)
     }
 }
 
 /// The pulse multiplier shared by every player at `timestamp`.
+#[must_use]
 pub fn pulse_scale(timestamp: f64, start_time: f64) -> f64 {
     let phase = (timestamp - start_time).rem_euclid(SCALING_PERIOD_MS) / SCALING_PERIOD_MS;
     1.0 + MAX_PULSE_SCALE * (phase * 2.0 * std::f64::consts::PI).sin()
@@ -191,6 +276,7 @@ pub struct Chooser {
 
 impl Chooser {
     /// A chooser with nobody's finger on the glass.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -201,21 +287,25 @@ impl Chooser {
     }
 
     /// How many fingers are down.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.players.len()
     }
 
     /// Whether the glass is untouched.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.players.is_empty()
     }
 
     /// The chosen player, if one has been chosen.
+    #[must_use]
     pub fn chosen(&self) -> Option<&Player> {
         self.chosen.and_then(|id| self.players.get(&id))
     }
 
     /// Whether a winner has been chosen and has not yet been cleared.
+    #[must_use]
     pub fn is_chosen(&self) -> bool {
         self.chosen.is_some()
     }
@@ -224,6 +314,7 @@ impl Chooser {
     ///
     /// The white arc on each player's ring is this timestamp's progress
     /// through [`DRAWING_TIME_MS`]; `None` means no arc at all.
+    #[must_use]
     pub fn draw_started_at(&self) -> Option<f64> {
         self.draw_started_at
     }
@@ -233,16 +324,50 @@ impl Chooser {
     /// Exactly the original's `started_timeout`: set when the timer is armed,
     /// cleared the moment it fires -- which is what stops a pointer event
     /// arriving in the same frame as the draw from starting a second one.
+    #[must_use]
     pub fn is_drawing(&self) -> bool {
         self.draw_started_at.is_some()
     }
 
+    /// When the draw clock actually starts counting, if a window is open.
+    ///
+    /// A window opens as soon as the second finger lands, but it does not start
+    /// counting until every mark has finished its own loading. Otherwise a finger
+    /// that slaps down just as the previous window was expiring would be picked
+    /// from a mark that is still charging -- and, worse, chosen from a screen where
+    /// the other marks had not arrived yet, which is not a screen anybody saw.
+    ///
+    /// So the clock starts when the last finger to land has loaded, and a finger
+    /// landing during the wait pushes it out again by its own loading time.
+    #[must_use]
+    pub fn ready_at(&self) -> Option<f64> {
+        let opened = self.draw_started_at?;
+        let last_to_land = self
+            .players
+            .values()
+            .map(|player| player.joined_at)
+            .fold(f64::NEG_INFINITY, f64::max);
+        Some(opened.max(last_to_land + REGISTRATION_TIME_MS))
+    }
+
+    /// Whether every mark has loaded and the draw clock is running.
+    #[must_use]
+    pub fn is_ready(&self, timestamp: f64) -> bool {
+        self.ready_at().is_some_and(|ready| timestamp >= ready)
+    }
+
     /// The white loading arc's progress at `timestamp`, 0 to 1.
     ///
-    /// `None` while no draw window is running, which draws no arc at all.
+    /// The app's second loading, and the one that runs on *every* mark at once: a
+    /// pale arc sweeping the ring's own band, from nothing round to closed, as the
+    /// draw window closes. It is measured from the moment the window is ready, so
+    /// the two loadings never overlap and the eye is never asked to follow both.
+    ///
+    /// `None` while no window is running, which draws no arc at all.
+    #[must_use]
     pub fn draw_progress(&self, timestamp: f64) -> Option<f64> {
-        let started = self.draw_started_at?;
-        Some(((timestamp - started) / DRAWING_TIME_MS).clamp(0.0, 1.0))
+        let ready = self.ready_at()?;
+        Some(((timestamp - ready) / DRAWING_TIME_MS).clamp(0.0, 1.0))
     }
 
     /// A finger went down at `(x, y)`.
@@ -261,6 +386,7 @@ impl Chooser {
                 x,
                 y,
                 chosen_at: None,
+                joined_at: now,
             },
         );
         self.restart_draw(now);
@@ -302,6 +428,7 @@ impl Chooser {
     /// Returns the winner's pointer id. Every other player leaves at once --
     /// their fingers are still down, but their circles are gone, because the
     /// original cleared the map around the winner and so did this.
+    #[must_use]
     pub fn draw(&mut self, now: f64, winner: usize) -> Option<i32> {
         // A draw needs two players and an unclaimed app, whatever the timer
         // thought it was doing.
@@ -328,6 +455,7 @@ impl Chooser {
     ///
     /// Returns `true` when the app was reset, which is the moment a new draw
     /// becomes possible.
+    #[must_use]
     pub fn tick(&mut self, now: f64) -> bool {
         let Some(lifted) = self.chosen_lifted_at else {
             return false;
@@ -346,44 +474,39 @@ impl Chooser {
         true
     }
 
-    /// How far the winner's circle has grown at `timestamp`, 0 to 1.
+    /// How far the winner's colour has flooded the screen at `timestamp`, 0 to 1.
     ///
-    /// Anchored to the instant of the draw, not to this frame, so the
-    /// expansion does not restart on every render.
+    /// Anchored to the instant of the draw, not to this frame, so the flood does
+    /// not restart on every render.
+    #[must_use]
     pub fn chosen_progress(&self, timestamp: f64) -> Option<f64> {
         let chosen_at = self.chosen()?.chosen_at?;
-        Some(
-            ((timestamp - chosen_at) / CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0),
-        )
+        Some(((timestamp - chosen_at) / CHOSEN_PLAYER_ANIMATION_TIME_MS).clamp(0.0, 1.0))
     }
 
-    /// The winner's circle radius at `timestamp`, given the viewport size.
+    /// The leading edge of the winner's colour at `timestamp`, given the viewport.
     ///
-    /// Grows from off-screen down to [`WINNER_RADIUS`], on an ease-out.
+    /// This is the *flood's* radius, and it is not the winner's circle growing.
+    /// Tracked by colour -- the furthest pixel from the winner's centre that has
+    /// taken the winner's colour, sampled every frame at 120fps -- the edge sits at
+    /// the disc's own outer radius the instant the draw ends, about 41 CSS px four
+    /// milliseconds later, 59 at 12ms, 89 at 33ms, 135 at 58ms and has left the
+    /// screen by 108ms. The whole 150ms window is a front leaving the mark and
+    /// crossing the screen, and the winner's mark never changes size.
     ///
-    /// The shape is measured, and it matters more than the duration. Frame by
-    /// frame from a recording, the fill covers 3% of the crop, then 12%, 33%, 65%,
-    /// 79% -- and is finished by the sixth frame. The growth is slowest leaving,
-    /// fastest through the middle, and then it *stops*: the last 80% of the
-    /// animation is the last 15% of the screen.
-    ///
-    /// A linear radius cannot do that, because a linear radius is fastest exactly
-    /// where the screen is densest and would appear to stop halfway. What the
-    /// recording shows is an exponential approach, so that is what this is: the
-    /// remaining distance decays by a constant fraction per unit time.
-    pub fn chosen_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
+    /// The easing is close to linear in radius, with a short start: 41, 59, 89,
+    /// 135 across the first 58ms is 18, 30, 46 CSS px per 20ms, decelerating as
+    /// the front leaves the densest part of the screen. A linear radius from the
+    /// measured start reproduces those four points to within a few px, which is
+    /// closer than any curve fitted to four samples can be justified.
+    #[must_use]
+    pub fn flood_radius(&self, timestamp: f64, width: f64, height: f64) -> Option<f64> {
         let progress = self.chosen_progress(timestamp)?;
-        let from = width.max(height).max(WINNER_RADIUS);
-        let span = from - WINNER_RADIUS;
-        // A smoothstep over the *first half* of the animation, then held.
-        //
-        // Measured frame by frame: the fill is 5% of the crop after one frame, 51%
-        // after two, 83% after three, and complete after five of six. So it is done
-        // at the halfway point and the rest of the window is the winner sitting
-        // there -- which is why it reads as a snap rather than a sweep. Stretching
-        // the same curve over the whole window is what made the original feel slow.
-        let t = (progress / FILL_FRACTION).clamp(0.0, 1.0);
-        Some(from - span * (t * t * (3.0 - 2.0 * t)))
+        // The front starts at the disc's edge, not at the centre: the disc is
+        // already the winner's colour, so the flood is what happens *outside* it.
+        let from = DISC_RADIUS;
+        let to = width.max(height) * 1.2;
+        Some(from + (to - from) * progress)
     }
 
     /// Whether the draw timer should be armed for this state.
@@ -417,7 +540,7 @@ mod tests {
     /// "the draw has happened" are one step.
     fn won(winner: usize) -> Chooser {
         let mut chooser = drawing();
-        chooser.draw(0.0, winner);
+        let _ = chooser.draw(0.0, winner);
         chooser
     }
 
@@ -495,15 +618,22 @@ mod tests {
     }
 
     #[test]
-    fn a_second_finger_starts_the_draw() {
+    fn a_second_finger_opens_the_draw() {
         let mut chooser = Chooser::new();
         chooser.pointer_down(1, 0.0, 0.0, 0.0);
         chooser.pointer_down(2, 50.0, 50.0, 40.0);
 
         assert!(chooser.is_drawing());
         assert_eq!(chooser.draw_started_at(), Some(40.0));
+        // The window is *open* but not *counting*: the second finger landed at 40ms
+        // and has 560ms of loading to do first, so no arc is drawn yet.
         assert_eq!(chooser.draw_progress(40.0), Some(0.0));
-        assert_eq!(chooser.draw_progress(40.0 + DRAWING_TIME_MS / 2.0), Some(0.5));
+        let ready = chooser.ready_at().expect("a window");
+        assert!((ready - (40.0 + REGISTRATION_TIME_MS)).abs() < 1e-9);
+        assert_eq!(
+            chooser.draw_progress(ready + DRAWING_TIME_MS / 2.0),
+            Some(0.5)
+        );
     }
 
     #[test]
@@ -559,14 +689,17 @@ mod tests {
         // glass to be the one that wins.
         for index in 0..2 {
             let mut chooser = drawing();
-            assert_eq!(chooser.draw(2500.0, index), Some(index as i32 + 1));
+            assert_eq!(
+                chooser.draw(2500.0, index),
+                Some(i32::try_from(index).unwrap() + 1)
+            );
         }
     }
 
     #[test]
     fn the_winner_is_anchored_to_the_instant_of_the_draw() {
         let mut chooser = drawing();
-        chooser.draw(2500.0, 0);
+        let _ = chooser.draw(2500.0, 0);
 
         // A later frame must not restart the expansion.
         assert_eq!(chooser.chosen_progress(2500.0), Some(0.0));
@@ -612,7 +745,7 @@ mod tests {
         let mut chooser = drawing();
         let winner = chooser.draw(2500.0, 0).expect("a winner");
         chooser.pointer_up(winner, 3000.0);
-        chooser.tick(3000.0 + RESTART_DELAY + 1.0);
+        let _ = chooser.tick(3000.0 + RESTART_DELAY + 1.0);
 
         chooser.pointer_down(4, 5.0, 5.0, 6000.0);
         chooser.pointer_down(5, 6.0, 6.0, 6100.0);
@@ -639,7 +772,7 @@ mod tests {
     #[test]
     fn a_draw_while_a_winner_is_showing_does_nothing() {
         let mut chooser = drawing();
-        chooser.draw(2500.0, 0);
+        let _ = chooser.draw(2500.0, 0);
 
         assert_eq!(chooser.draw(3000.0, 1), None);
         assert_eq!(chooser.len(), 1, "still one player");
@@ -682,7 +815,10 @@ mod tests {
         // and the native app's median is 49% across 1184 sampled pixels.
         assert_eq!(Player::color(1), "hsl(126, 100%, 49%)");
         assert_eq!(Player::color(0), "hsl(263, 100%, 49%)");
-        assert_eq!(COLOUR_LIGHTNESS, 49.0, "the measured native lightness");
+        assert!(
+            (COLOUR_LIGHTNESS - 49.0).abs() < 1e-9,
+            "the measured native lightness"
+        );
         for id in 1..12 {
             let colour = Player::color(id);
             assert!(colour.starts_with("hsl("), "{colour} is a CSS colour");
@@ -709,15 +845,21 @@ mod tests {
             })
             .collect();
         let mut sorted = hues.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted.sort_by(f64::total_cmp);
         sorted.dedup();
         assert_eq!(sorted.len(), hues.len(), "no repeat hues: {hues:?}");
     }
 
     #[test]
     fn the_pulse_breathes_symmetrically_around_its_rest_size() {
+        // 7000ms is not a multiple of the measured 808ms period, which is the
+        // point: equal *elapsed* times must give equal phases whatever the period.
+        const ELAPSED: f64 = 7_000.0;
         let start = 0.0;
-        assert!((pulse_scale(start, start) - 1.0).abs() < 1e-12, "starts at rest");
+        assert!(
+            (pulse_scale(start, start) - 1.0).abs() < 1e-12,
+            "starts at rest"
+        );
         assert!(
             (pulse_scale(SCALING_PERIOD_MS / 4.0, start) - (1.0 + MAX_PULSE_SCALE)).abs() < 1e-12,
             "a quarter period is full pulse"
@@ -734,7 +876,7 @@ mod tests {
             "three quarters of a period is the low point"
         );
         for step in 0..=100 {
-            let scale = pulse_scale(SCALING_PERIOD_MS * step as f64 / 100.0, start);
+            let scale = pulse_scale(SCALING_PERIOD_MS * f64::from(step) / 100.0, start);
             assert!(
                 ((1.0 - MAX_PULSE_SCALE)..=(1.0 + MAX_PULSE_SCALE)).contains(&scale),
                 "{scale} is within the pulse range"
@@ -755,152 +897,277 @@ mod tests {
             "the pulse does not drift with the clock"
         );
         // Anchored to the first frame, so a finger joining later is still in
-        // step with the others.
+        // step with the others: the pulse is a function of the time since the
+        // first frame alone, and a player's own arrival never enters it.
+        //
+        // Stated as equal elapsed times rather than as two absolute timestamps,
+        // because that is the actual invariant -- the old form of this assertion
+        // only held while the period divided 7000 evenly, which was an accident of
+        // the previous 1000ms period and not a property of anything.
         assert!(
-            (pulse_scale(10_000.0, 3_000.0) - pulse_scale(1_000.0, 0.0)).abs() < 1e-12,
+            (pulse_scale(10_000.0, 10_000.0 - ELAPSED) - pulse_scale(ELAPSED, 0.0)).abs() < 1e-12,
             "every player breathes in step, whenever it arrived"
         );
-    }
-
-    #[test]
-    fn the_winner_radius_starts_off_screen_and_settles_at_the_minimum() {
-        let chooser = won(0);
-
-        let (width, height) = (800.0, 1600.0);
-        let start = chooser.chosen_radius(0.0, width, height).expect("a radius");
-        let end = chooser
-            .chosen_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, width, height)
-            .expect("a radius");
-
-        assert!(start >= 1600.0, "starts off the long edge: {start}");
+        // And the period really is the measured one, so the phase wraps.
         assert!(
-            (end - WINNER_RADIUS).abs() < 1e-6,
-            "settles at the winner's own size: {end} vs {WINNER_RADIUS}"
-        );
-        assert!(
-            end < start,
-            "and the circle grows rather than shrinking"
+            (pulse_scale(SCALING_PERIOD_MS, 0.0) - pulse_scale(0.0, 0.0)).abs() < 1e-12,
+            "one breath returns the mark to where it started"
         );
     }
 
     #[test]
-    fn the_fill_is_done_halfway_through_the_reveal() {
-        // Measured: 5%, 51%, 83%, complete -- five frames into six. The rest of the
-        // window is the winner sitting in its own colour, not a fill still creeping
-        // across the glass, and that is why the native app's reveal reads as a snap.
+    fn the_black_annulus_and_the_flood_front_are_two_different_radii() {
+        // Drawn as one radius they meet, and at that instant an even-odd fill of a
+        // rectangle minus a circle of the same radius cancels to nothing: the screen
+        // goes black exactly when it should be solid colour. This is not a
+        // hypothetical, it is what the first version of this did.
+        //
+        // So the hole is the measured annulus and the front is measured separately,
+        // and the invariant is that the hole never catches up with the front.
         let chooser = won(0);
         let (w, h) = (1080.0, 2340.0);
-        let t = CHOSEN_PLAYER_ANIMATION_TIME_MS;
-        let at = |fraction: f64| {
-            chooser
-                .chosen_radius(t * fraction, w, h)
-                .expect("a radius")
-        };
-
+        let mut last_hole = f64::NEG_INFINITY;
+        for step in 0..=60 {
+            let t = CHOSEN_PLAYER_ANIMATION_TIME_MS * f64::from(step) / 60.0;
+            let front = chooser.flood_radius(t, w, h).expect("a front");
+            // What `paint` draws as the hole.
+            let hole = WINNER_RADIUS.min(front);
+            assert!(
+                hole < front || (front - hole).abs() < 1e-9,
+                "the hole ({hole}) must never pass the front ({front}) at {t}ms"
+            );
+            assert!(
+                hole >= last_hole,
+                "the hole only ever opens: {hole} after {last_hole}"
+            );
+            last_hole = hole;
+        }
+        // And once settled they are the two measured numbers, in order.
+        let front = chooser
+            .flood_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, w, h)
+            .expect("a front");
         assert!(
-            (at(FILL_FRACTION) - WINNER_RADIUS).abs() < 1e-6,
-            "the fill has reached its final size by {:.0}%: {}",
-            FILL_FRACTION * 100.0,
-            at(FILL_FRACTION)
+            front > WINNER_RADIUS,
+            "the front is outside the annulus, not equal to it: {front}"
         );
-        // And it stays there: a hold, not a stall mid-sweep.
-        assert_eq!(at(0.75), at(FILL_FRACTION));
-        assert_eq!(at(1.0), at(FILL_FRACTION));
+        const { assert!(WINNER_RADIUS > MARK_RADIUS * (1.0 + MAX_PULSE_SCALE)) };
     }
 
     #[test]
-    fn the_fill_is_a_smoothstep_not_a_linear_sweep() {
-        // Slow out of the gate, fastest in the middle, easing into the edge. A
-        // linear radius looks mechanical precisely because it is fastest where the
-        // screen is densest.
+    fn the_flood_starts_at_the_discs_edge_and_leaves_the_screen() {
+        // Measured by colour, not by a mark's bounding box: the furthest pixel
+        // from the winner's centre that has taken the winner's colour is at 41 CSS
+        // px four milliseconds after the draw, 59 at 12ms, 89 at 33ms, 135 at
+        // 58ms, and has left the screen by 108ms.
+        //
+        // The first of those is the point. The flood does not start at the centre
+        // and does not start by the mark growing: the disc is already the winner's
+        // colour, so what floods is everything *outside* it.
         let chooser = won(0);
         let (w, h) = (1080.0, 2340.0);
-        let t = CHOSEN_PLAYER_ANIMATION_TIME_MS * FILL_FRACTION;
-        let at = |fraction: f64| {
-            chooser
-                .chosen_radius(t * fraction, w, h)
-                .expect("a radius")
-        };
-        let span = at(0.0) - at(1.0);
-        let covered = |f: f64| (at(0.0) - at(f)) / span;
+        let start = chooser.flood_radius(0.0, w, h).expect("a front");
 
-        assert!(covered(0.25) < 0.2, "slow to start: {:.2}", covered(0.25));
         assert!(
-            covered(0.5) > 0.4 && covered(0.5) < 0.6,
-            "fastest through the middle: {:.2}",
-            covered(0.5)
+            (start - DISC_RADIUS).abs() < 1e-6,
+            "the front starts at the disc's edge, {start} vs {DISC_RADIUS}"
         );
-        // A smoothstep is 0.84 at three quarters, not 0.9 -- and it has to *land*
-        // on exactly 1.0 at the end, which is the property that matters.
-        assert!(covered(0.75) > 0.8, "and easing in: {:.2}", covered(0.75));
-        assert!((covered(1.0) - 1.0).abs() < 1e-9, "landing exactly: {:.6}", covered(1.0));
-
-        // Monotonic: the circle only ever grows.
-        let mut last = f64::INFINITY;
+        // And it only ever moves outward: the mark is not growing.
+        let mut last = f64::NEG_INFINITY;
         for step in 0..=40 {
-            let r = at(f64::from(step) / 40.0);
-            assert!(r <= last + 1e-9, "the circle shrank at step {step}");
+            let r = chooser
+                .flood_radius(
+                    CHOSEN_PLAYER_ANIMATION_TIME_MS * f64::from(step) / 40.0,
+                    w,
+                    h,
+                )
+                .expect("a front");
+            assert!(r >= last - 1e-9, "the front moved back at step {step}");
             last = r;
+        }
+        // Past the far corner, so the screen is fully covered and stays covered.
+        assert!(
+            last > w.max(h),
+            "the front leaves the screen entirely: {last}"
+        );
+    }
+
+    #[test]
+    fn the_winners_own_mark_does_not_move_when_the_flood_does() {
+        // The geometry the recording forces, and the one the previous build got
+        // backwards: the flood is a front leaving the mark, so the black annulus
+        // between the winner and its own colour is a fixed size rather than
+        // something the mark grows into.
+        let chooser = won(0);
+        let (w, h) = (1080.0, 2340.0);
+        // A mark at full pulse is 60.9 CSS px across the outer edge (54.3 at rest,
+        // swinging 11.7%). The flood settles at 104.
+        let outer = MARK_RADIUS * (1.0 + MAX_PULSE_SCALE);
+        assert!(
+            WINNER_RADIUS > outer,
+            "the black annulus at {WINNER_RADIUS} clears the mark at {outer}"
+        );
+        // Measured: the annulus sits at 103.8-104.3 CSS px once the flood is done.
+        assert!(
+            (WINNER_RADIUS - 104.0).abs() < 1e-9,
+            "and it is the measured 104 CSS px"
+        );
+        // The mark is untouched by the flood entirely, which is the whole claim.
+        let at_end = chooser
+            .flood_radius(CHOSEN_PLAYER_ANIMATION_TIME_MS, w, h)
+            .expect("a front");
+        assert!(
+            at_end > WINNER_RADIUS,
+            "the front is outside the annulus, not equal to it: {at_end}"
+        );
+    }
+
+    #[test]
+    fn the_mark_is_four_bands_measured_from_the_centre_outward() {
+        // 1080px Galaxy S25 at 3x, scanned radially from a mark's centre -- found
+        // by the pale dot, the only unambiguous centre a frame of video offers.
+        // dot 0-7.7, disc to 35.7, black gap to 44.3, pale ring to 54.3 CSS px.
+        //
+        // The band *order* is the invariant worth having. The last build dropped
+        // the gap and the ring as artefacts of a blurred screenshot, which made
+        // the mark a flat blob; the one before drew the disc and ring edge to edge,
+        // which merged them. Both were wrong about the same thing, and only a test
+        // on the order catches it -- the individual numbers are all plausible.
+        // A const block, so a changed measurement fails to compile here rather
+        // than quietly shipping a mark with a different structure. These are
+        // arithmetic on constants, so there is nothing to check at run time.
+        const {
+            assert!(DOT_RADIUS > 0.0, "a dot at the centre");
+            assert!(DISC_RADIUS > DOT_RADIUS, "the disc is outside the dot");
+            assert!(
+                GAP_OUTER_RADIUS > DISC_RADIUS,
+                "the gap is outside the disc"
+            );
+            assert!(
+                MARK_RADIUS > GAP_OUTER_RADIUS,
+                "the ring is outside the gap"
+            );
+            assert!(
+                RING_INNER_RADIUS > DISC_RADIUS,
+                "the ring is clear of the disc"
+            );
+            // The gap is real, not a rounding artefact: 7.6 CSS px of measured
+            // black. A gap that vanished into the disc is what the last build did.
+            assert!(
+                GAP_OUTER_RADIUS - DISC_RADIUS > 5.0,
+                "a gap wide enough to see"
+            );
+            // And the ring is a band, not a hairline: 9 CSS px.
+            assert!(
+                MARK_RADIUS - RING_INNER_RADIUS > 5.0,
+                "a ring thick enough to see"
+            );
         }
     }
 
     #[test]
-    fn the_winner_radius_never_collapses_on_a_tiny_screen() {
-        // The starting radius is at least `WINNER_RADIUS`, so a very small
-        // viewport does not make the circle shrink as it grows in.
-        let mut chooser = drawing();
-        chooser.draw(0.0, 0);
+    fn the_pulse_matches_the_measured_breath() {
+        // An isolated mark's outer radius, sampled at 120fps over half a breath:
+        // 53.0 to 60.0 CSS px. So at rest the mark breathes between MARK_RADIUS and
+        // MARK_RADIUS * 1.117, and the previous 1.07 was close to half the swing.
+        let lo = MARK_RADIUS;
+        let hi = MARK_RADIUS * (1.0 + MAX_PULSE_SCALE);
+        assert!(
+            (lo - 53.0).abs() < 1.5,
+            "the resting mark is the measured 54.3, giving a ~53 floor: {lo}"
+        );
+        assert!(
+            (hi - 60.0).abs() < 1.5,
+            "and it peaks near the measured 60: {hi}"
+        );
+        // One full breath, measured at 808ms by FFT.
+        assert!(
+            (SCALING_PERIOD_MS - 808.0).abs() < 1.0,
+            "the breath is 808ms, measured"
+        );
+    }
+
+    #[test]
+    fn a_mark_charges_from_its_own_touchdown() {
+        // The first of the app's two loadings, and the reason a mark is an event
+        // rather than something that is simply there. Measured: 560ms from touch
+        // to full size, with a pale ring sweeping round behind the growing disc.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 400.0);
+
+        let early = chooser.players().next().expect("a player");
         assert_eq!(
-            chooser.chosen_radius(0.0, 10.0, 10.0),
-            Some(WINNER_RADIUS)
+            early.registration(0.0),
+            Some(0.0),
+            "it starts loading the instant it lands"
+        );
+        assert_eq!(early.registration(REGISTRATION_TIME_MS / 2.0), Some(0.5));
+        assert_eq!(
+            early.registration(REGISTRATION_TIME_MS),
+            None,
+            "and stops costing anything once it has arrived"
+        );
+        // A later finger is measured from its own landing, not from the first.
+        let late = chooser.players().nth(1).expect("the second player");
+        assert_eq!(late.registration(400.0), Some(0.0));
+        assert_eq!(late.registration(400.0 + REGISTRATION_TIME_MS), None);
+    }
+
+    #[test]
+    fn the_draw_waits_for_every_finger_to_load() {
+        // Without this, a finger that lands just as the previous window was
+        // expiring is picked from a mark still charging, from a screen whose other
+        // marks had not arrived -- a screen nobody saw.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 400.0);
+
+        assert!(chooser.is_drawing(), "the window is open");
+        assert!(!chooser.is_ready(400.0), "but it is not counting yet");
+        assert_eq!(
+            chooser.ready_at(),
+            Some(400.0 + REGISTRATION_TIME_MS),
+            "it starts when the last finger has loaded"
+        );
+
+        // A third finger at the instant the window was about to fire pushes it out.
+        let ready = chooser.ready_at().expect("a window");
+        chooser.pointer_down(3, 50.0, 50.0, ready);
+        assert!(!chooser.is_ready(ready), "a late finger holds it back");
+        assert_eq!(chooser.ready_at(), Some(ready + REGISTRATION_TIME_MS));
+    }
+
+    #[test]
+    fn the_second_loading_starts_when_the_first_one_ends() {
+        // The two loadings never overlap, so the eye is never asked to follow both
+        // at once: the mark finishes charging, and then the draw's arc begins.
+        let mut chooser = Chooser::new();
+        chooser.pointer_down(1, 0.0, 0.0, 0.0);
+        chooser.pointer_down(2, 100.0, 100.0, 0.0);
+        let ready = chooser.ready_at().expect("a window");
+
+        assert_eq!(chooser.draw_progress(ready), Some(0.0), "it starts there");
+        assert_eq!(
+            chooser.draw_progress(ready - 1.0),
+            Some(0.0),
+            "clamped before"
+        );
+        assert_eq!(chooser.draw_progress(ready + DRAWING_TIME_MS), Some(1.0));
+        // The first finger is fully loaded by then, so the two are sequential.
+        assert_eq!(
+            chooser
+                .players()
+                .next()
+                .expect("a player")
+                .registration(ready),
+            None
         );
     }
 
     #[test]
-    fn the_mark_is_a_solid_disc_with_a_dot() {
-        // The structure, measured radially through the exact centre of a mark in
-        // the native recording (the centre being found by the dot itself): colour
-        // runs unbroken from 13 to 36 CSS px, with black outside 40. There is no
-        // gap and no separate ring, and an earlier build drew both.
-        //
-        // So the invariants are: one outer radius, a dot well inside it, and no
-        // ring or gap constants at all -- their absence is the point, and
-        // `tests/shell.rs` checks the drawing code does not reintroduce them.
-        assert_eq!(MARK_RADIUS, 40.0, "80 CSS px across, measured");
-        // Compile-time, because these are arithmetic on constants: a measurement
-        // that changes has to fail here rather than quietly ship a different mark.
-        const {
-            assert!(
-                DOT_RADIUS < MARK_RADIUS * 0.3,
-                "the dot is about a sixth of the mark"
-            )
-        };
-        const { assert!(DOT_RADIUS > 0.0, "and there is a dot to see") };
-    }
-
-    #[test]
-    fn the_winner_radius_clears_the_marks_edge() {
-        // The one geometric claim the constant exists for: at full pulse the
-        // winner's own mark sits strictly inside the finished fill, so the winner
-        // reads as a hole in the colour rather than a mark painted over it.
-        let outer = MARK_RADIUS * (1.0 + MAX_PULSE_SCALE);
-        assert!(
-            WINNER_RADIUS > outer,
-            "the fill at {WINNER_RADIUS} must clear the mark at {outer}"
-        );
-        // And it clears it by the author's own separation, scaled by the same swing.
-        assert!(
-            (WINNER_RADIUS - outer - CHOSEN_SEPARATION * (1.0 + MAX_PULSE_SCALE)).abs() < 1e-9,
-            "by exactly CHOSEN_SEPARATION"
-        );
-        // The dot is well inside the fill too, so the winner stays a bead of light.
-        const { assert!(DOT_RADIUS * (1.0 + MAX_PULSE_SCALE) < WINNER_RADIUS) };
-    }
-
-    #[test]
-    fn there_is_no_winner_radius_before_a_draw() {
+    fn there_is_no_flood_before_a_draw() {
         let chooser = drawing();
-        assert_eq!(chooser.chosen_radius(0.0, 800.0, 800.0), None);
+        assert_eq!(chooser.flood_radius(0.0, 800.0, 800.0), None);
         assert_eq!(chooser.chosen_progress(0.0), None);
     }
 
@@ -914,7 +1181,7 @@ mod tests {
             chooser.pointer_down(3, 1.0, 2.0, 0.0);
             chooser.pointer_down(1, 3.0, 4.0, 0.0);
             chooser.pointer_move(3, 9.0, 9.0);
-            chooser.draw(DRAWING_TIME_MS, 1);
+            let _ = chooser.draw(DRAWING_TIME_MS, 1);
             chooser
         }
         assert_eq!(run(), run());

@@ -47,8 +47,7 @@ fn tracked_files() -> Option<String> {
         .args(["rev-parse", "--git-dir"])
         .current_dir(root())
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|out| out.status.success());
     if !inside {
         return None;
     }
@@ -65,7 +64,10 @@ fn tracked_files() -> Option<String> {
 #[test]
 fn the_page_loads_generated_bindings_not_a_manual_wasm_abi() {
     let page = shell();
-    assert!(page.contains("<!DOCTYPE html>"), "the shell must be a document");
+    assert!(
+        page.contains("<!DOCTYPE html>"),
+        "the shell must be a document"
+    );
     assert!(page.contains("<script type=\"module\">"), "a module script");
     assert!(
         page.contains("import('./app.js')"),
@@ -346,7 +348,7 @@ fn worker_assets(worker: &str) -> Vec<String> {
         .expect("the worker must declare ASSETS");
     let body_start = start + "const ASSETS = [".len();
     let end = worker[body_start..]
-        .find("]")
+        .find(']')
         .expect("the ASSETS list must be terminated");
     worker[body_start..body_start + end]
         .split(',')
@@ -475,8 +477,7 @@ fn no_user_visible_text_names_the_implementation() {
     // assumed, because this string is the only thing standing between a failed
     // load and a blank black screen.
     assert!(
-        page.contains("could not start")
-            && page.contains("Reload the page"),
+        page.contains("could not start") && page.contains("Reload the page"),
         "the failure UI must say what failed and what to try"
     );
     assert!(
@@ -500,8 +501,7 @@ fn rendered_text(page: &str) -> String {
         while let Some(start) = text.find(open) {
             let end = text[start..]
                 .find(close)
-                .map(|end| start + end + close.len())
-                .unwrap_or(text.len());
+                .map_or(text.len(), |end| start + end + close.len());
             text = format!("{}{}", &text[..start], &text[end..]);
         }
     }
@@ -509,8 +509,7 @@ fn rendered_text(page: &str) -> String {
     while let Some(start) = text.find('<') {
         let end = text[start..]
             .find('>')
-            .map(|end| start + end + 1)
-            .unwrap_or(text.len());
+            .map_or(text.len(), |end| start + end + 1);
         text = format!("{}{}", &text[..start], &text[end..]);
     }
     text.replace("&nbsp;", " ")
@@ -526,30 +525,30 @@ fn string_literals(source: &str) -> Vec<String> {
         .split('"')
         .skip(1)
         .step_by(2)
-        .map(|literal| literal.to_string())
+        .map(str::to_string)
         .collect()
 }
 
-/// The mark is a solid disc with a pale dot -- and no gap, no ring.
+/// The mark is four measured bands, and they are drawn in order.
 ///
-/// Measured radially through the exact centre of a mark in the native recording,
-/// with the centre located by the dot itself (which is also why the dot matters:
-/// it is the only unambiguous centre in a frame of video): the colour runs
-/// unbroken from 13 to 36 CSS px and there is black outside 40.
+/// Measured radially outward from a mark's centre in the native app, on a 1080px
+/// Galaxy S25 at 3x: a pale dot to 7.7 CSS px, the saturated disc to 35.7, a black
+/// gap to 44.3, and a pale ring to 54.3.
 ///
-/// An earlier build drew a disc, a 3px black gap and a separate ring, read off a
-/// blurred 340px crop of a frame where two circles happened to overlap. Neither
-/// the gap nor the ring exists in the app. This test is the guard against putting
-/// them back, and it checks the drawing code as well as the constants -- a ring
-/// that comes back as a draw call rather than as a constant would otherwise sail
-/// straight through.
+/// Two previous builds got this wrong in opposite directions, from the same frame:
+/// one drew the disc and the ring edge to edge so they merged into a flat blob, and
+/// the next took the gap and the ring for artefacts of a blurred crop and deleted
+/// them. Both were confident and both were wrong, because every individual radius
+/// is a plausible number -- only the order and the gaps between them are evidence.
+///
+/// So this checks the drawing code, not only the constants: a ring that comes back
+/// as a draw call rather than as a constant would otherwise sail straight through.
 #[test]
-fn the_mark_is_a_solid_disc_with_a_dot_and_no_gap() {
+fn the_mark_is_four_bands_in_measured_order() {
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
 
-    // Scoped to the drawing function: `LOADING_COLOR` is declared at the top of
-    // the file, so searching the whole file for it finds the declaration and every
-    // offset after it compares wrong.
+    // Scoped to the drawing function: `DOT_COLOUR` is referenced in more than one
+    // place, so searching the whole file would compare offsets from the wrong one.
     let draw = ui
         .split("fn draw_player(")
         .nth(1)
@@ -558,23 +557,27 @@ fn the_mark_is_a_solid_disc_with_a_dot_and_no_gap() {
         .next()
         .expect("the end of the function");
 
-    let disc = draw.find("MARK_RADIUS * pulse").expect("the disc");
-    let dot = draw.find("DOT_RADIUS * pulse").expect("the dot");
-    let arc = draw.find("LOADING_COLOR").expect("the loading arc");
+    let dot = draw.find("DOT_RADIUS * scale").expect("the dot");
+    let disc = draw.find("DISC_RADIUS * scale").expect("the disc");
+    let ring = draw.find("MARK_RADIUS * scale").expect("the ring");
+    let arc = draw.find("LOADING_COLOR").expect("the draw's arc");
     assert!(
-        disc < dot && dot < arc,
-        "draw order must be disc ({disc}), dot ({dot}), loading arc ({arc})"
+        disc < dot && dot < ring && ring < arc,
+        "draw order must be disc ({disc}), dot ({dot}), ring ({ring}), \
+         loading arc ({arc}) -- the dot sits on top of the disc, and the ring \
+         outside both"
     );
 
-    // And none of the shapes that do not exist -- anywhere, not only here.
-    for invented in ["destination-out", "OUTER_RADIUS", "OUTER_CIRCLE_WIDTH"] {
-        assert!(
-            !ui.contains(invented),
-            "{invented:?} draws a gap or a ring that the native app does not have"
-        );
-    }
+    // The ring is stroked at the band's own width, not as a line at the disc's
+    // edge. Drawn edge to edge, the two merge into one shape, which is exactly
+    // what the build before last did.
+    assert!(
+        draw.contains("MARK_RADIUS - chooser::RING_INNER_RADIUS"),
+        "the ring must be stroked at the width of its own measured band, or it \
+         spills into the gap the band was measured to have"
+    );
 
-    // The sizes, measured on a 1080px-wide S25 at 3x.
+    // The gap is the difference between the two bands, and it has to be visible.
     let chooser = std::fs::read_to_string(root().join("src/chooser.rs")).expect("chooser.rs");
     let constant = |name: &str| -> f64 {
         chooser
@@ -584,31 +587,46 @@ fn the_mark_is_a_solid_disc_with_a_dot_and_no_gap() {
             .and_then(|n| n.trim().parse().ok())
             .unwrap_or_else(|| panic!("{name}"))
     };
-    let mark = constant("MARK_RADIUS");
-    let dot = constant("DOT_RADIUS");
-    assert!(
-        (mark - 40.0).abs() < 0.5,
-        "the mark is {mark} CSS px in radius; measured 40"
+    let (disc, dot, gap, mark) = (
+        constant("DISC_RADIUS"),
+        constant("DOT_RADIUS"),
+        constant("GAP_OUTER_RADIUS"),
+        constant("MARK_RADIUS"),
     );
-    assert!(
-        (dot - 6.5).abs() < 0.5,
-        "the dot is {dot} CSS px in radius; measured 6.3"
-    );
-    // The dot is what makes it read as lit rather than flat, so it must be
-    // clearly visible and clearly separate from the edge.
-    assert!(dot > 3.0, "a dot under 3px disappears on a high-density screen");
-    assert!(dot < mark / 3.0, "and it must not crowd the edge");
+    for (name, got, want) in [
+        ("the disc", disc, 35.7),
+        ("the dot", dot, 7.7),
+        ("the gap's outer edge", gap, 44.3),
+        ("the mark's outer edge", mark, 54.3),
+    ] {
+        assert!(
+            (got - want).abs() < 0.5,
+            "{name} is {got} CSS px; measured {want}"
+        );
+    }
+    assert!(gap - disc > 5.0, "the gap is wide enough to see");
+    assert!(mark - gap > 5.0, "and so is the ring");
 
-    // The colour, measured over 1184 saturated pixels from two native recordings.
+    // The two loadings are separate arcs, not one arc doing two jobs: the mark
+    // charges from its own touchdown, and the draw's arc sweeps afterwards.
+    assert!(
+        draw.contains("player.registration") || draw.contains("loaded < 1.0"),
+        "the per-finger loading must be drawn"
+    );
+    assert!(
+        ui.contains("flood_radius"),
+        "the flood must be a front from the disc's edge, not the mark growing"
+    );
+
+    // The colour, measured over saturated pixels from the native recordings.
     let lightness = constant("COLOUR_LIGHTNESS");
     assert!(
         (lightness - 49.0).abs() < 1.0,
-        "lightness is {lightness}%; the native median is 49%, and the web app's 40% \
-         is nine points darker than what people are used to seeing"
+        "lightness is {lightness}%; the native median is 49%"
     );
     assert!(
-        chooser.contains("DOT_COLOUR"),
-        "the dot's colour must be the sampled one, not a guess"
+        chooser.contains("DOT_COLOUR") && chooser.contains("RING_MIX"),
+        "the dot's colour and the ring's mix must be the sampled ones, not guesses"
     );
 }
 
@@ -622,13 +640,7 @@ fn the_mark_is_a_solid_disc_with_a_dot_and_no_gap() {
 #[test]
 fn the_start_screen_is_bare() {
     let page = shell();
-    for unwanted in [
-        "You made",
-        "Put at least",
-        "Chwazi's",
-        "1W",
-        "counter",
-    ] {
+    for unwanted in ["You made", "Put at least", "Chwazi's", "1W", "counter"] {
         assert!(
             !page.contains(unwanted),
             "the native app's start screen has {unwanted:?}, and this one must not"

@@ -97,10 +97,7 @@ fn main() {
         built.push((*name, bytes));
     }
     built.extend(rasterize_icons(&root));
-    built.push((
-        derived[0],
-        manifest().into_bytes(),
-    ));
+    built.push((derived[0], manifest().into_bytes()));
 
     // Last, because it hashes everything above: the worker's cache name has to
     // move when any of them does.
@@ -111,7 +108,7 @@ fn main() {
 
 /// Rasterize `assets/icon.svg` at each install size.
 ///
-/// `assets/icon.svg` is the author's original Material Symbols "touch_long",
+/// `assets/icon.svg` is the author's original Material Symbols `touch_long`,
 /// kept byte for byte: the committed, authoritative, hand-editable icon. These
 /// PNGs are build output derived from it, which is why neither exists in the
 /// tree between builds.
@@ -121,7 +118,8 @@ fn main() {
 /// and a 192 render differ only in output resolution and both are exact.
 fn rasterize_icons(root: &Path) -> Vec<(&'static str, Vec<u8>)> {
     let svg = std::fs::read(root.join("assets/icon.svg"))
-        .unwrap_or_else(|error| panic!("reading assets/icon.svg: {error}"));    let options = usvg::Options::default();
+        .unwrap_or_else(|error| panic!("reading assets/icon.svg: {error}"));
+    let options = usvg::Options::default();
     let tree = usvg::Tree::from_data(&svg, &options)
         .unwrap_or_else(|error| panic!("parsing assets/icon.svg: {error}"));
 
@@ -130,7 +128,12 @@ fn rasterize_icons(root: &Path) -> Vec<(&'static str, Vec<u8>)> {
         let mut pixmap = tiny_skia::Pixmap::new(size, size)
             .unwrap_or_else(|| panic!("a {size}x{size} pixmap: out of memory"));
         // f32, not f64: `resvg` takes a `Transform`, whose fields are f32.
-        let scale = size as f32 / tree.size().width() as f32;
+        //
+        // The `u32` is widened before it becomes an f32 rather than after: 192 and
+        // 512 are both exactly representable, but casting down first and widening
+        // to f64 in between is a rounding step that the sizes do not need and that
+        // a larger icon size would make visible.
+        let scale = f32::from(u16::try_from(size).unwrap_or(u16::MAX)) / tree.size().width() as f32;
         let transform = tiny_skia::Transform::from_scale(scale, scale);
         resvg::render(&tree, transform, &mut pixmap.as_mut());
         let png = pixmap
@@ -241,8 +244,7 @@ fn cache_version(root: &Path, built: &[(&str, Vec<u8>)], worker_template: &str) 
 /// Each is written under a scratch name and renamed over its target, so a host
 /// serving the directory never observes a half-written file.
 fn write_tree(dir: &Path, built: &[(&str, Vec<u8>)]) {
-    std::fs::create_dir_all(dir)
-        .unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+    std::fs::create_dir_all(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
 
     for (name, bytes) in built {
         let path = dir.join(name);

@@ -220,9 +220,11 @@ fn render(
 ) -> Option<(i32, usize)> {
     borrow(app, |app| {
         let mut announced = None;
-        app.chooser.tick(timestamp);
+        // The reset is a side effect here: the frame after it simply finds an
+        // empty chooser, and nothing about the drawing changes to announce.
+        let _ = app.chooser.tick(timestamp);
 
-        let drawing_since = app.chooser.draw_started_at();
+        let drawing_since = app.chooser.ready_at();
         if let Some(since) = drawing_since {
             if timestamp - since >= chooser::DRAWING_TIME_MS {
                 // The number of players is read before the draw, because the
@@ -264,19 +266,26 @@ fn paint(
     let pulse = chooser::pulse_scale(timestamp, start_time);
 
     if let Some(winner) = app.chosen() {
-        if let Some(radius) = app.chosen_radius(timestamp, width, height) {
-            // A rectangle and a circle in one path, filled even-odd: the circle
-            // is a hole in the colour that floods the screen, so the winner
-            // stays visible after the fill has finished. The radius the
-            // chooser returns is what leaves the winner's own ring showing
-            // through it.
+        if let Some(front) = app.flood_radius(timestamp, width, height) {
+            // The winner's colour floods *outward from the disc's edge*, leaving the
+            // mark sitting in a hole of black around it.
+            //
+            // The two radii are different numbers and both are measured. The front
+            // starts at the disc's own edge (35.7 CSS px) and crosses the screen in
+            // 150ms; the hole is the black annulus, whose outer edge measures 104
+            // CSS px once the flood is done.
+            //
+            // They are separate on purpose. Drawn as one radius, the hole and the
+            // front would grow together and meet, and at that instant an even-odd
+            // fill of a rectangle minus a circle of the same radius cancels to
+            // nothing -- the screen would go black exactly when it should be solid
+            // colour. So the hole opens to its measured size immediately, and the
+            // front only ever moves outward from it.
             match web_sys::Path2d::new() {
                 Ok(path) => {
                     path.rect(0.0, 0.0, width, height);
-                    if path
-                        .arc(winner.x, winner.y, radius, 0.0, TWO_PI)
-                        .is_ok()
-                    {
+                    let hole = chooser::WINNER_RADIUS.min(front);
+                    if path.arc(winner.x, winner.y, hole, 0.0, TWO_PI).is_ok() {
                         context.set_fill_style_str(&winner.color_of());
                         context.fill_with_path_2d_and_winding(
                             &path,
@@ -288,79 +297,128 @@ fn paint(
             }
         }
         // The winner alone, at full pulse, and never a loading arc: the draw is
-        // over, and the arc sweeping the rest of its ring would read as a
-        // second, still-running draw.
-        draw_player(context, winner, pulse, 1.0);
+        // over, and an arc sweeping its ring would read as a second, still-running
+        // draw. It has already loaded, so it is drawn loaded.
+        draw_player(context, winner, pulse, 1.0, None);
         return;
     }
 
-    let progress = app.draw_progress(timestamp).unwrap_or(0.0);
+    let progress = app.draw_progress(timestamp);
     for player in app.players() {
-        draw_player(context, player, pulse, progress);
+        // The first loading, per finger: the mark charges from the instant it
+        // landed, so it is drawn at the size it has actually reached.
+        let loaded = player.registration(timestamp).map_or(1.0, |loaded| {
+            // The disc eases out to full size rather than growing linearly: the
+            // measured radii over the first 120ms are 8, 16, 19, 23, 26, 29, 33
+            // CSS px, which is fast at first and then settles.
+            loaded * loaded * (3.0 - 2.0 * loaded)
+        });
+        draw_player(context, player, pulse, loaded, progress);
     }
 }
 
-/// One player: a filled inner disc, a ring around it, and the white arc that
-/// counts the draw down.
+/// One player: a pale dot, a coloured disc, a black gap and a pale ring, and the
+/// two arcs that load them.
+///
+/// The structure is measured, band by band, from the centre outward on a 1080px
+/// Galaxy S25 at 3x: pale dot to 7.7 CSS px, saturated disc to 35.7, black gap to
+/// 44.3, pale ring to 54.3.
+///
+/// The band order is the point. The disc and the ring are both the player's
+/// colour, so drawn edge to edge they merge into a single flat blob, which is
+/// what the build before last did; and dropping the gap and the ring entirely,
+/// which is what the last build did, leaves a dot on a disc with no structure
+/// around it. The gap is what separates them.
 fn draw_player(
     context: &web_sys::CanvasRenderingContext2d,
     player: &Player,
     pulse: f64,
-    loading: f64,
+    loaded: f64,
+    draw: Option<f64>,
 ) {
     let colour = player.color_of();
-    // A solid disc with a pale dot at its centre. That is the whole mark.
-    //
-    // The previous version drew a disc, a black gap and a separate ring. A radial
-    // scan through the exact centre of a mark in the native recording -- located by
-    // the dot itself -- shows the colour running unbroken from 13 to 36 CSS px
-    // with nothing outside it, so the gap and the ring were invented from a blurred
-    // screenshot and do not exist in the app being matched.
-    let radius = chooser::MARK_RADIUS * pulse;
+    // The whole mark breathes in the pulse, and the loading scales what has
+    // arrived so far -- a mark that is a third loaded is a third of every band,
+    // which is what makes it read as arriving rather than as fading in.
+    let scale = pulse * loaded;
 
+    // The saturated disc, first, because the dot is drawn on top of it.
     context.begin_path();
-    // `arc` on the 2d context is fallible in web-sys's bindings and infallible in
-    // the browser -- a radius that is not finite throws there. It is the one call
-    // whose failure would end the frame, so it is checked; the others are not,
-    // because no number that reaches them can be non-finite.
-    if let Err(error) = context.arc(player.x, player.y, radius, 0.0, TWO_PI) {
+    if let Err(error) = context.arc(
+        player.x,
+        player.y,
+        chooser::DISC_RADIUS * scale,
+        0.0,
+        TWO_PI,
+    ) {
         show_failure(&describe(&error));
         return;
     }
     context.set_fill_style_str(&colour);
     context.fill();
 
-    // The dot. Drawn in the mark's own pulse, so it breathes with everything else.
-    context.begin_path();
-    if context
-        .arc(
-            player.x,
-            player.y,
-            chooser::DOT_RADIUS * pulse,
-            0.0,
-            TWO_PI,
-        )
-        .is_ok()
-    {
-        context.set_fill_style_str(chooser::DOT_COLOUR);
-        context.fill();
+    // The pale dot at the centre, on top of the disc. It is what makes the mark
+    // read as a bead of light rather than a flat blob, and on a saturated colour it
+    // is the only part of the mark that does not move when the pulse does.
+    if scale > 0.0 {
+        context.begin_path();
+        if context
+            .arc(player.x, player.y, chooser::DOT_RADIUS * scale, 0.0, TWO_PI)
+            .is_ok()
+        {
+            context.set_fill_style_str(chooser::DOT_COLOUR);
+            context.fill();
+        }
     }
 
-    // The loading arc sweeps the mark's edge while the draw runs: a gap of a
-    // quarter turn at the start of the window, closing to nothing by the end, and
-    // the whole circle when no window is running at all.
-    let remaining = 1.0 - loading;
+    // The pale ring, in the ring's own band: from 45.3 to 54.3 CSS px, which is
+    // 9 wide. It is stroked at the band's own width so it cannot spill into the
+    // gap the band was measured to have, which is the mistake that made the ring
+    // and the disc read as one shape.
+    let ring_radius = chooser::MARK_RADIUS * scale;
     context.begin_path();
-    let _ = context.arc(
-        player.x,
-        player.y,
-        radius,
-        TWO_PI * remaining / 2.0,
-        TWO_PI * remaining * 3.0 / 2.0,
-    );
-    context.set_line_width(chooser::ARC_WIDTH * pulse);
-    context.set_stroke_style_str(LOADING_COLOR);
-    context.stroke();
+    if context
+        .arc(player.x, player.y, ring_radius, 0.0, TWO_PI)
+        .is_ok()
+    {
+        context.set_line_width((chooser::MARK_RADIUS - chooser::RING_INNER_RADIUS) * scale);
+        context.set_stroke_style_str(&player.ring_color());
+        context.stroke();
+    }
+
+    // The first loading: while the mark is still charging, a pale arc sweeps the
+    // ring's band from a point round to closed, over the finger's own
+    // registration window. The ring is the thing that loads, and the disc is
+    // already there underneath it -- so the sweep is legible as a sweep rather
+    // than as the mark appearing.
+    //
+    // Drawn at full ring width but at the ring's radius, so it *is* the ring,
+    // thickening into place as the mark grows.
+    if loaded < 1.0 {
+        context.begin_path();
+        let _ = context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI * loaded);
+        context.set_line_width(chooser::ARC_WIDTH * scale.max(0.35));
+        context.set_stroke_style_str(chooser::DOT_COLOUR);
+        context.stroke();
+    }
+
+    // The second loading: while the draw window runs, a second arc sweeps the same
+    // band the other way, closing over DRAWING_TIME_MS. It is a lighter tint
+    // rather than the dot's colour, so the two sweeps never read as one shape.
+    if let Some(progress) = draw {
+        let remaining = 1.0 - progress;
+        context.begin_path();
+        let _ = context.arc(
+            player.x,
+            player.y,
+            ring_radius,
+            TWO_PI * remaining / 2.0,
+            TWO_PI * remaining * 3.0 / 2.0,
+        );
+        context.set_line_width(chooser::ARC_WIDTH * scale);
+        context.set_stroke_style_str(LOADING_COLOR);
+        context.stroke();
+    }
 }
 
 /// One unbiased index into `len` players.
@@ -450,11 +508,38 @@ fn resize(canvas: &web_sys::HtmlCanvasElement) {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let width = window.inner_width().ok().and_then(dimension).unwrap_or(1);
-    let height = window.inner_height().ok().and_then(dimension).unwrap_or(1);
+    let width = window
+        .inner_width()
+        .ok()
+        .and_then(|v| dimension(&v))
+        .unwrap_or(1);
+    let height = window
+        .inner_height()
+        .ok()
+        .and_then(|v| dimension(&v))
+        .unwrap_or(1);
     let scale = device_pixel_ratio();
-    canvas.set_width((f64::from(width) * scale).round().max(1.0) as u32);
-    canvas.set_height((f64::from(height) * scale).round().max(1.0) as u32);
+    canvas.set_width(backing(width, scale));
+    canvas.set_height(backing(height, scale));
+}
+
+/// A canvas dimension in device pixels, from a CSS size and the screen's ratio.
+///
+/// Rounded here rather than at the call site so both axes go through the same
+/// arithmetic. The `f64 -> u32` conversion is saturating rather than a cast: the
+/// product of a viewport dimension and a device pixel ratio is well inside `u32`
+/// on any real screen, and a cast that would silently wrap on a nonsense value
+/// would set the canvas to some arbitrary size instead of falling back to 1px.
+fn backing(css: u32, scale: f64) -> u32 {
+    let wanted = f64::from(css) * scale;
+    if !wanted.is_finite() || wanted < 1.0 {
+        return 1;
+    }
+    // Above `u32::MAX` this saturates, which is the only sensible answer: a canvas
+    // that big is not addressable and the browser would refuse it anyway.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rounded = wanted.round() as u32;
+    rounded.max(1)
 }
 
 /// Borrow the app for the length of `body`.
@@ -680,8 +765,20 @@ where
 }
 
 /// `innerWidth`/`innerHeight`, which web-sys exposes as untyped properties.
-fn dimension(value: JsValue) -> Option<u32> {
-    value.as_f64().map(|size| size as u32)
+///
+/// A viewport dimension is a whole number of CSS pixels, and the browser only
+/// ever hands back a finite non-negative one. A value that is not -- a NaN
+/// viewport, or a value beyond `u32` -- falls back to 1px, which is the same
+/// answer [`backing`] gives, and is the one that keeps the canvas at a size the
+/// browser will actually accept.
+fn dimension(value: &JsValue) -> Option<u32> {
+    let size = value.as_f64()?;
+    if !size.is_finite() || size < 1.0 {
+        return Some(1);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rounded = size.round() as u32;
+    Some(rounded.clamp(1, u32::MAX))
 }
 
 /// A `JsValue` as text, without throwing on anything.

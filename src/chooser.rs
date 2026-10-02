@@ -145,23 +145,23 @@ pub const MAX_PULSE_SCALE: f64 = 0.065;
 
 /// How long a draw window lasts once two players are present.
 ///
-/// 3000ms, chosen rather than measured, and the user asked for it.
+/// 2400ms, chosen rather than measured, and the user set it.
 ///
-/// The 2500ms before it came from the original app. The window now *covers* the
-/// ring in the player's colour rather than sweeping an arc, so its progress is
-/// legible as a filling band, and three seconds is long enough to read it as one.
-pub const DRAWING_TIME_MS: f64 = 3000.0;
+/// The window covers the ring in the player's colour rather than sweeping an arc,
+/// so its progress is legible as a filling band. It is still nearly three times the
+/// arrival, which is what makes the two read as two stages rather than one
+/// gesture of two lengths.
+pub const DRAWING_TIME_MS: f64 = 2400.0;
 
 /// How long one finger takes to load its own mark.
 ///
-/// 1000ms, chosen rather than measured, and the user asked for it.
+/// 850ms, chosen rather than measured, and the user set it.
 ///
-/// What the recording shows is 620ms: the disc reaches full size in about 100ms and
-/// the sweep closes over the rest. At that speed the sweep is over before anyone has
-/// registered that it was happening, and the two-sided sweep added to it needs room
-/// to be read at all -- two arcs meeting is legible as a gesture in a way one arc
-/// sweeping past is not.
-pub const REGISTRATION_TIME_MS: f64 = 1000.0;
+/// The recordings show 620ms: the disc reaches full size in about 100ms and the
+/// sweep closes over the rest. This is a little longer than that, and deliberately
+/// so -- the sweep is two arcs meeting, which is legible as a gesture in a way one
+/// arc sweeping past is not, and it wants room to be read.
+pub const REGISTRATION_TIME_MS: f64 = 850.0;
 
 /// The share of the registration during which the disc reaches full size.
 ///
@@ -796,6 +796,13 @@ mod tests {
         assert!(chooser.players().all(|player| player.id != 2));
     }
 
+    /// An instant after which any draw window has closed, for the tests that need
+    /// "the window is over" without hard-coding a number that a change to either
+    /// duration could quietly strand.
+    fn after_window() -> f64 {
+        REGISTRATION_TIME_MS + DRAWING_TIME_MS + 1.0
+    }
+
     #[test]
     fn one_finger_is_not_a_draw() {
         let mut chooser = Chooser::new();
@@ -804,7 +811,10 @@ mod tests {
         assert_eq!(chooser.len(), REQUIRED_PLAYER_COUNT - 1);
         assert!(!chooser.is_drawing(), "a draw needs two players");
         assert!(chooser.draw_progress(0.0).is_none(), "and so no arc");
-        assert_eq!(chooser.draw(2500.0, 0, 0.0), None, "and no winner");
+        // Well past when any draw could have fired, so this is a draw refused for
+        // want of a second player rather than one that is merely late.
+        let late = REGISTRATION_TIME_MS + DRAWING_TIME_MS + 1.0;
+        assert_eq!(chooser.draw(late, 0, 0.0), None, "and no winner");
     }
 
     #[test]
@@ -864,7 +874,7 @@ mod tests {
         for winner in 0..3 {
             let mut chooser = drawing();
             let chosen = chooser
-                .draw(2500.0, winner, 0.0)
+                .draw(after_window(), winner, 0.0)
                 .expect("two players, so a winner");
 
             assert!([1, 2].contains(&chosen), "picked from the players");
@@ -880,7 +890,7 @@ mod tests {
         for index in 0..2 {
             let mut chooser = drawing();
             assert_eq!(
-                chooser.draw(2500.0, index, 0.0),
+                chooser.draw(after_window(), index, 0.0),
                 Some(i32::try_from(index).unwrap() + 1)
             );
         }
@@ -889,12 +899,12 @@ mod tests {
     #[test]
     fn the_winner_is_anchored_to_the_instant_of_the_draw() {
         let mut chooser = drawing();
-        let _ = chooser.draw(2500.0, 0, 0.0);
+        let _ = chooser.draw(after_window(), 0, 0.0);
 
         // A later frame must not restart the expansion.
-        assert_eq!(chooser.chosen_progress(2500.0), Some(0.0));
+        assert_eq!(chooser.chosen_progress(after_window()), Some(0.0));
         assert_eq!(
-            chooser.chosen_progress(2500.0 + CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0),
+            chooser.chosen_progress(after_window() + CHOSEN_PLAYER_ANIMATION_TIME_MS / 2.0),
             Some(0.5)
         );
         assert_eq!(chooser.chosen_progress(999_999.0), Some(1.0));
@@ -903,14 +913,17 @@ mod tests {
     #[test]
     fn the_winner_survives_lifting_and_a_new_finger_lands_nowhere() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
+        let winner = chooser.draw(after_window(), 0, 0.0).expect("a winner");
 
-        chooser.pointer_up(winner, 3000.0);
+        let lifted = after_window();
+        chooser.pointer_up(winner, lifted);
         assert_eq!(chooser.len(), 1, "the winner's circle stays put");
         assert_eq!(chooser.chosen().map(|p| p.id), Some(winner));
 
-        // The app is not reset yet, so a new finger is not a player.
-        chooser.pointer_down(9, 10.0, 10.0, 3100.0, 0.0);
+        // The app is not reset yet, so a new finger is not a player. Halfway
+        // through the hold, expressed against the hold rather than as a literal, so
+        // it stays halfway whatever the durations are.
+        chooser.pointer_down(9, 10.0, 10.0, lifted + RESTART_DELAY / 2.0, 0.0);
         assert_eq!(chooser.len(), 1);
         assert!(!chooser.is_drawing());
     }
@@ -918,12 +931,15 @@ mod tests {
     #[test]
     fn the_reset_comes_exactly_two_seconds_after_the_winner_lifts() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
+        let winner = chooser.draw(after_window(), 0, 0.0).expect("a winner");
 
-        chooser.pointer_up(winner, 3000.0);
-        assert!(!chooser.tick(3000.0 + RESTART_DELAY - 1.0), "not yet");
+        chooser.pointer_up(winner, after_window());
         assert!(
-            chooser.tick(3000.0 + RESTART_DELAY),
+            !chooser.tick(after_window() + RESTART_DELAY - 1.0),
+            "not yet"
+        );
+        assert!(
+            chooser.tick(after_window() + RESTART_DELAY),
             "the reset happens once the delay has elapsed"
         );
         assert!(chooser.is_empty());
@@ -933,22 +949,29 @@ mod tests {
     #[test]
     fn a_reset_chooser_can_draw_again() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
-        chooser.pointer_up(winner, 3000.0);
-        let _ = chooser.tick(3000.0 + RESTART_DELAY + 1.0);
+        let winner = chooser.draw(after_window(), 0, 0.0).expect("a winner");
+        chooser.pointer_up(winner, after_window());
+        // All of these are offsets from the same origin, so shortening either
+        // loading cannot leave the test asserting against a moment that no longer
+        // exists -- which is what a fixed timestamp here did.
+        let reset = after_window() + RESTART_DELAY + 1.0;
+        let _ = chooser.tick(reset);
 
-        chooser.pointer_down(4, 5.0, 5.0, 6000.0, 0.0);
-        chooser.pointer_down(5, 6.0, 6.0, 6100.0, 0.0);
+        let first = reset + 1.0;
+        chooser.pointer_down(4, 5.0, 5.0, first, 0.0);
+        chooser.pointer_down(5, 6.0, 6.0, first + 1.0, 0.0);
 
         assert!(chooser.is_drawing(), "the app is reusable after a reset");
         assert!(chooser.chosen().is_none());
-        assert_eq!(chooser.draw(8600.0, 1, 0.0), Some(5));
+        // And the second round actually draws, which is the point of the test.
+        let ready = chooser.ready_at().expect("a second window");
+        assert_eq!(chooser.draw(ready + DRAWING_TIME_MS, 1, 0.0), Some(5));
     }
 
     #[test]
     fn a_winner_held_down_does_not_reset_the_app() {
         let mut chooser = drawing();
-        let winner = chooser.draw(2500.0, 0, 0.0).expect("a winner");
+        let winner = chooser.draw(after_window(), 0, 0.0).expect("a winner");
 
         // Still holding the winner: there is no "lifted" moment, so no reset,
         // however long the page is left alone.
@@ -962,9 +985,9 @@ mod tests {
     #[test]
     fn a_draw_while_a_winner_is_showing_does_nothing() {
         let mut chooser = drawing();
-        let _ = chooser.draw(2500.0, 0, 0.0);
+        let _ = chooser.draw(after_window(), 0, 0.0);
 
-        assert_eq!(chooser.draw(3000.0, 1, 0.0), None);
+        assert_eq!(chooser.draw(after_window(), 1, 0.0), None);
         assert_eq!(chooser.len(), 1, "still one player");
         assert!(chooser.is_chosen(), "still chosen");
     }
@@ -985,7 +1008,7 @@ mod tests {
         let mut chooser = Chooser::new();
         chooser.pointer_down(1, 0.0, 0.0, 0.0, 0.0);
 
-        assert_eq!(chooser.draw(2500.0, 0, 0.0), None);
+        assert_eq!(chooser.draw(after_window(), 0, 0.0), None);
         assert!(!chooser.is_chosen());
     }
 
@@ -994,7 +1017,11 @@ mod tests {
         // Indices come from a random draw, so a caller may pass anything; an
         // out-of-range index must still name a real player.
         let mut chooser = drawing();
-        assert_eq!(chooser.draw(2500.0, 17, 0.0), Some(2), "17 % 2 == 1");
+        assert_eq!(
+            chooser.draw(after_window(), 17, 0.0),
+            Some(2),
+            "17 % 2 == 1"
+        );
     }
 
     #[test]
@@ -1688,13 +1715,14 @@ mod tests {
     }
 
     #[test]
-    fn the_two_loadings_take_one_and_three_seconds() {
+    fn the_two_loadings_take_the_times_the_user_set() {
         // Both durations are the user's choice, stated as such where they are
         // defined. They are asserted here so a change to either is deliberate.
-        assert!((REGISTRATION_TIME_MS - 1000.0).abs() < 1e-9);
-        assert!((DRAWING_TIME_MS - 3000.0).abs() < 1e-9);
-        // And the draw is long enough to be read as counting down rather than as a
-        // flash, which is why it is not the original app's 2500ms.
+        assert!((REGISTRATION_TIME_MS - 850.0).abs() < 1e-9);
+        assert!((DRAWING_TIME_MS - 2400.0).abs() < 1e-9);
+        // And the choice is still worth waiting for: it is several times the
+        // arrival, so the two read as two stages rather than one gesture of two
+        // lengths.
         const {
             assert!(
                 DRAWING_TIME_MS > REGISTRATION_TIME_MS,

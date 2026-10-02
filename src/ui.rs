@@ -266,24 +266,22 @@ fn paint(
     let pulse = chooser::pulse_scale(timestamp, start_time);
 
     if let Some(winner) = app.chosen() {
-        if let Some(front) = app.flood_radius(timestamp, width, height) {
-            // The winner's colour floods *outward from the disc's edge*, leaving the
-            // mark sitting in a hole of black around it.
+        if let Some(front) = app.flood_front(timestamp, height) {
+            // The winner's colour wipes DOWN the screen from the top edge, and the
+            // winner is a hole in it.
             //
-            // The two radii are different numbers and both are measured. The front
-            // starts at the disc's own edge (35.7 CSS px) and crosses the screen in
-            // 150ms; the hole is the black annulus, whose outer edge measures 104
-            // CSS px once the flood is done.
+            // The hole is the measured black annulus -- 104 CSS px, the outer edge
+            // of the black ring that separates the winner from its own colour once
+            // the wipe has passed. It is *not* the wipe's own geometry: drawn as
+            // one radius they would meet, and at that instant an even-odd fill of a
+            // rectangle minus a circle of equal radius cancels to nothing, so the
+            // screen would go black exactly when it should be solid colour.
             //
-            // They are separate on purpose. Drawn as one radius, the hole and the
-            // front would grow together and meet, and at that instant an even-odd
-            // fill of a rectangle minus a circle of the same radius cancels to
-            // nothing -- the screen would go black exactly when it should be solid
-            // colour. So the hole opens to its measured size immediately, and the
-            // front only ever moves outward from it.
+            // The hole is clipped to the wiped band as well, because until the wipe
+            // reaches it there is no colour there to punch a hole in.
             match web_sys::Path2d::new() {
                 Ok(path) => {
-                    path.rect(0.0, 0.0, width, height);
+                    path.rect(0.0, 0.0, width, front);
                     let hole = chooser::WINNER_RADIUS.min(front);
                     if path.arc(winner.x, winner.y, hole, 0.0, TWO_PI).is_ok() {
                         context.set_fill_style_str(&winner.color_of());
@@ -371,34 +369,46 @@ fn draw_player(
         }
     }
 
-    // The pale ring, in the ring's own band: from 45.3 to 54.3 CSS px, which is
-    // 9 wide. It is stroked at the band's own width so it cannot spill into the
-    // gap the band was measured to have, which is the mistake that made the ring
-    // and the disc read as one shape.
-    let ring_radius = chooser::MARK_RADIUS * scale;
+    // The pale ring, in the ring's own band: 45.3 to 54.3 CSS px, which is 9 wide.
+    //
+    // Stroked at the band's *centreline*, 49.8, not at its outer edge. A stroke is
+    // centred on the path it follows, so stroking at 54.3 laid the band from 49.8
+    // to 58.8: 4.5px of ring outside the measured edge, and 4.5px of the gap left
+    // showing as a second black band inside the first. That is what a too-large gap
+    // looks like, and it is invisible in the constants -- both numbers are correct,
+    // and only the arithmetic between them was wrong.
+    let ring_radius = chooser::RING_STROKE_RADIUS * scale;
+
+    // The first loading IS the ring: while the mark is charging, the ring is only
+    // drawn as far round as the mark has loaded, so a sweep is visible as a sweep.
+    //
+    // Drawing the full ring first and then an arc over it -- which is what this did
+    // first -- makes the loading invisible, and not because the arc was faint: both
+    // were near-white, so the arc had nothing to reveal. The ring is the part that
+    // arrives, so the part that has not arrived must not be drawn at all.
+    let ring_to = if loaded < 1.0 {
+        TWO_PI * loaded
+    } else {
+        TWO_PI
+    };
     context.begin_path();
     if context
-        .arc(player.x, player.y, ring_radius, 0.0, TWO_PI)
+        .arc(player.x, player.y, ring_radius, 0.0, ring_to)
         .is_ok()
     {
-        context.set_line_width((chooser::MARK_RADIUS - chooser::RING_INNER_RADIUS) * scale);
-        context.set_stroke_style_str(&player.ring_color());
-        context.stroke();
-    }
-
-    // The first loading: while the mark is still charging, a pale arc sweeps the
-    // ring's band from a point round to closed, over the finger's own
-    // registration window. The ring is the thing that loads, and the disc is
-    // already there underneath it -- so the sweep is legible as a sweep rather
-    // than as the mark appearing.
-    //
-    // Drawn at full ring width but at the ring's radius, so it *is* the ring,
-    // thickening into place as the mark grows.
-    if loaded < 1.0 {
-        context.begin_path();
-        let _ = context.arc(player.x, player.y, ring_radius, 0.0, TWO_PI * loaded);
-        context.set_line_width(chooser::ARC_WIDTH * scale.max(0.35));
-        context.set_stroke_style_str(chooser::DOT_COLOUR);
+        context.set_line_width(chooser::ARC_WIDTH * scale);
+        // Brighter than the finished ring while it loads, so a charging mark reads
+        // as "not arrived yet" rather than as a smaller mark.
+        //
+        // Bound to a local: the colour is a `String` built per frame, and passing
+        // the temporary straight into the call borrows one that is dropped before
+        // the browser has finished reading it.
+        let ring = if loaded < 1.0 {
+            chooser::DOT_COLOUR.to_string()
+        } else {
+            player.ring_color()
+        };
+        context.set_stroke_style_str(&ring);
         context.stroke();
     }
 

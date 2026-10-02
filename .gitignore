@@ -3,3 +3,7 @@ target/
 # the two install PNGs rasterized from `assets/icon.svg`. Generated, never
 # committed -- it is reproducible from the committed sources.
 dist/
+
+# Scratch the release tool writes into the checkout while recovering a
+# half-finished release. Not source, and not reproducible from it.
+.release-recovery/

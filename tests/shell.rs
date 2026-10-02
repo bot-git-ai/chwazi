@@ -559,7 +559,7 @@ fn the_mark_is_four_bands_in_measured_order() {
 
     let dot = draw.find("DOT_RADIUS * scale").expect("the dot");
     let disc = draw.find("DISC_RADIUS * scale").expect("the disc");
-    let ring = draw.find("MARK_RADIUS * scale").expect("the ring");
+    let ring = draw.find("RING_STROKE_RADIUS * scale").expect("the ring");
     let arc = draw.find("LOADING_COLOR").expect("the draw's arc");
     assert!(
         disc < dot && dot < ring && ring < arc,
@@ -568,13 +568,21 @@ fn the_mark_is_four_bands_in_measured_order() {
          outside both"
     );
 
-    // The ring is stroked at the band's own width, not as a line at the disc's
-    // edge. Drawn edge to edge, the two merge into one shape, which is exactly
-    // what the build before last did.
+    // The ring is stroked at the band's *centreline*, at its own width.
+    //
+    // Both halves of that matter and they are different mistakes. Stroking at the
+    // disc's edge merges the ring into the disc, which is what the build before
+    // last did. Stroking at the band's *outer* edge instead lays the band from
+    // 49.8 to 58.8 CSS px -- outside the measured mark, and leaving 4.5px of the
+    // gap showing as a second black band -- which is "the gap is too big", and it
+    // is invisible in the constants because every number in it is correct.
     assert!(
-        draw.contains("MARK_RADIUS - chooser::RING_INNER_RADIUS"),
-        "the ring must be stroked at the width of its own measured band, or it \
-         spills into the gap the band was measured to have"
+        draw.contains("RING_STROKE_RADIUS * scale"),
+        "the ring must be stroked at the middle of its band, not at its edge"
+    );
+    assert!(
+        draw.contains("chooser::ARC_WIDTH * scale"),
+        "and at the width of the band itself"
     );
 
     // The gap is the difference between the two bands, and it has to be visible.
@@ -607,6 +615,30 @@ fn the_mark_is_four_bands_in_measured_order() {
     assert!(gap - disc > 5.0, "the gap is wide enough to see");
     assert!(mark - gap > 5.0, "and so is the ring");
 
+    // The per-finger loading is the ring *itself* being drawn round, not an arc
+    // painted over a finished ring. The first version drew the full ring and then
+    // a near-white arc on top of it, which made the loading invisible -- not
+    // because the arc was faint, but because both were near-white, so it had
+    // nothing to reveal. The part of the ring that has not arrived must not be
+    // drawn at all.
+    assert!(
+        draw.contains("if loaded < 1.0 {") && draw.contains("TWO_PI * loaded"),
+        "the ring must be drawn only as far round as the mark has loaded"
+    );
+    assert!(
+        !draw.contains("RING_MIX_MARKER"),
+        "sanity: the drawing function is the one under test"
+    );
+    // And the loading arc must not be stroked as a full circle before the mark
+    // has loaded -- that is the bug in the shape this asserts against.
+    let full_ring_before_load = draw
+        .find("0.0, TWO_PI)")
+        .is_some_and(|full| draw.find("loaded").is_some_and(|l| l > full));
+    assert!(
+        !full_ring_before_load,
+        "no full ring may be drawn before the mark has loaded"
+    );
+
     // The two loadings are separate arcs, not one arc doing two jobs: the mark
     // charges from its own touchdown, and the draw's arc sweeps afterwards.
     assert!(
@@ -614,8 +646,8 @@ fn the_mark_is_four_bands_in_measured_order() {
         "the per-finger loading must be drawn"
     );
     assert!(
-        ui.contains("flood_radius"),
-        "the flood must be a front from the disc's edge, not the mark growing"
+        ui.contains("flood_front"),
+        "the flood must be a wipe down the screen, measured from the top edge"
     );
 
     // The colour, measured over saturated pixels from the native recordings.

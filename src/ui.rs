@@ -263,23 +263,24 @@ fn paint(
     let pulse = chooser::pulse_scale(timestamp, start_time);
 
     if let Some(winner) = app.chosen() {
-        if let Some(front) = app.flood_front(timestamp, height) {
-            // The winner's colour wipes DOWN the screen from the top edge, and by
-            // the end the whole screen is that colour except the winner and the
-            // black circle around it.
+        if let Some(front) = app.flood_radius(timestamp, width, height) {
+            // The winner's colour floods OUTWARD as a disc centred on the winner.
             //
-            // The hole is the measured black annulus -- 104 CSS px to its outer edge
-            // -- and it is a separate number from the front. Drawn as the front's own
+            // Measured by probing out from the winner in eight directions every
+            // frame: south 248 CSS px at 5.000s, north 236 at 5.008s, west 175 at
+            // 5.017s, east 192 at 5.025s. They advance together, a few milliseconds
+            // apart, which is a disc drawn as a ring of pixels -- not a wipe, which
+            // would make north arrive first and the rest together.
+            //
+            // The hole is the measured black annulus, 104 CSS px to its outer edge,
+            // and it is a separate number from the front. Drawn as the front's own
             // geometry the two would meet, and an even-odd fill of a rectangle minus
             // a circle of equal radius cancels to nothing, so the screen would go
             // black exactly when it should be solid colour.
             match web_sys::Path2d::new() {
                 Ok(path) => {
-                    path.rect(0.0, 0.0, width, front);
-                    if path
-                        .arc(winner.x, winner.y, chooser::WINNER_RADIUS, 0.0, TWO_PI)
-                        .is_ok()
-                    {
+                    path.rect(0.0, 0.0, width, height);
+                    if path.arc(winner.x, winner.y, front, 0.0, TWO_PI).is_ok() {
                         context.set_fill_style_str(&winner.color_of());
                         context.fill_with_path_2d_and_winding(
                             &path,
@@ -340,23 +341,22 @@ fn draw_player(
     let colour = player.color_of();
     // The whole mark breathes in the pulse.
     let scale = pulse;
+    // Both loadings sweep from here, and grow towards it, so the tail stays put.
+    let origin = chooser::LOADING_ARC_START.to_radians();
 
-    // The disc grows into its place on its own, much faster than the loading arc
-    // sweeps: measured, it reaches full size at about 100ms of a 620ms load, and
-    // then sits still for the remaining 500ms while the arc comes round.
+    // The disc, and the disc alone, is what a finger puts on the glass.
     //
-    // Tying the disc's growth to the same fraction as the sweep is what made the
-    // load look static -- the mark inflated slowly and then stopped, and the eye
-    // was given most of a second of nothing. The disc's arrival is front-loaded and
-    // eased, and the arc does the rest of the work.
-    let disc_scale = loading.map_or(1.0, Player::disc_arrival);
+    // There is no ring until the ring has loaded. A mark that arrives as a disc
+    // already wearing its finished ring, with a second ring outside it sweeping to
+    // show progress, is two rings and a disc; the native app has a disc, and then
+    // the ring grows onto it.
+    let arrived = loading.map_or(1.0, Player::disc_arrival);
 
-    // The saturated disc.
     context.begin_path();
     if let Err(error) = context.arc(
         player.x,
         player.y,
-        chooser::DISC_RADIUS * disc_scale,
+        chooser::DISC_RADIUS * scale * arrived,
         0.0,
         TWO_PI,
     ) {
@@ -366,21 +366,46 @@ fn draw_player(
     context.set_fill_style_str(&colour);
     context.fill();
 
-    // The ring's centreline: the radius it is stroked at. A stroke is centred on the
-    // path it follows, so this has to be the *middle* of the band -- stroking at the
-    // outer edge would lay it from 52.2 to 61.7, outside the measured mark, and
-    // would leave 4.75px of the gap showing as a second black band. Every number in
-    // that is correct and only the arithmetic between them is wrong, which is why it
-    // survived a build.
+    // The ring, and the ring is the loading.
+    //
+    // It is drawn only as far round as the load has got, in the player's own colour,
+    // starting from the fixed 135 degrees. Three things follow from making the ring
+    // *be* the progress rather than a track with an arc over it:
+    //
+    // * there is no second ring. A mark is a disc and, while it is loading, part of
+    //   a ring -- not a disc, a finished ring, and a loading ring.
+    // * the ring cannot "flip back", because the ring is what arrives. There is no
+    //   pale overlay to be revealed when the load ends.
+    // * the selection loading is the same shape finishing its sweep, because it is
+    //   the same ring.
+    //
+    // The band is the ring's own, stroked at its centreline, which is the only
+    // radius at which the band lands on the band.
     let ring_radius = chooser::RING_STROKE_RADIUS * scale;
 
-    // The ring, in the ring's own band, stroked at the band's centreline.
-    //
-    // It is a *track*, not a finished shape: it is the full circle in the ring's own
-    // tint whether or not anything is loading, and both loadings are drawn on top of
-    // it. That is the whole reason there are two loadings rather than one -- the
-    // track has to exist first, or an arc drawn over it has nothing to reveal, which
-    // is what made the first version of this invisible.
+    // The loading sweep, from the fixed origin round as far as it has got. It ends
+    // at the origin rather than starting there, so its tail stays pinned to 7:30 and
+    // the leading edge is the thing that travels.
+    let sweep = loading
+        .map(|t| (origin - TWO_PI * t, t))
+        .or(draw.map(|t| (origin - TWO_PI * t, t)));
+    if let Some((from, _)) = sweep {
+        context.begin_path();
+        if context
+            .arc(player.x, player.y, ring_radius, from, origin)
+            .is_ok()
+        {
+            context.set_line_width(chooser::ARC_WIDTH * scale);
+            // The player's own colour: a fixed pale colour is orange against every
+            // hue that is not orange, so the sweep appeared to belong to whichever
+            // player happened to be orange.
+            context.set_stroke_style_str(&colour);
+            context.stroke();
+        }
+        return;
+    }
+
+    // Loaded: the full ring, in the player's colour darkened to 0.77.
     context.begin_path();
     if context
         .arc(player.x, player.y, ring_radius, 0.0, TWO_PI)
@@ -393,89 +418,6 @@ fn draw_player(
         let ring = player.ring_color();
         context.set_stroke_style_str(&ring);
         context.stroke();
-    }
-
-    // The first loading: the finger's own registration. A pale arc sweeps from a
-    // fixed start at 7:30 round to closed, over 620ms, while the disc beneath it has
-    // already arrived.
-    //
-    // Three things this has to get right, and each was wrong in a build:
-    //
-    // * the radius. It is the ring's own radius, unscaled by the loading fraction.
-    //   Scaling it drags the arc inward every frame, so it drifts out of the ring's
-    //   band and the mark's bands stop lining up -- the misalignment reported with
-    //   this fix.
-    // * the colour. The player's own colour, washed toward white, not a fixed
-    //   warm off-white. A constant pale colour is orange against every hue that is
-    //   not orange, which is why the sweep looked like it belonged to nobody.
-    // * the start angle. Measured, the sweep's leading edge is 146, 140, 134, 128,
-    //   122 degrees... it only ever moves one way, so the fixed 135 is the origin
-    //   and not part of the animation.
-    //
-    // The arc *ends* at the fixed 135 degrees and grows backwards from there, so the
-    // one end stays pinned to the origin and the leading edge travels. Starting at
-    // the origin instead makes the arc grow forwards, which shortens its tail at
-    // 135 degrees as the load proceeds -- so the moment the load finishes and the
-    // arc is dropped, the ring snaps back to its resting tint and the mark appears
-    // to un-load. That is the "the colour should stay loaded, not flip back": the
-    // flip is the tail retreating, not the ring changing.
-    if let Some(loading) = loading {
-        let origin = chooser::LOADING_ARC_START.to_radians();
-        // Its own band, outside the ring's, so the ring underneath keeps its own
-        // colour for the whole load instead of being recoloured by the sweep and
-        // released when it ends.
-        let radius = ring_radius + chooser::LOADING_ARC_GROWTH * scale;
-        context.begin_path();
-        if context
-            .arc(
-                player.x,
-                player.y,
-                radius,
-                origin - TWO_PI * loading,
-                origin,
-            )
-            .is_ok()
-        {
-            context.set_line_width(chooser::ARC_WIDTH * scale);
-            let arc = player.loading_color();
-            context.set_stroke_style_str(&arc);
-            context.stroke();
-        }
-    }
-
-    // The second loading: the draw window closing.
-    //
-    // The ring's band fills up with the player's own colour over the window, so the
-    // ring visibly charges rather than sitting there for two and a half seconds.
-    //
-    // It is drawn on the ring's *own* radius, not on a second circle offset outside
-    // it. The previous build offset it by 2px so the two loadings could not overlap,
-    // which solved a real problem with the wrong tool: a second circle is a visibly
-    // misaligned ring, and a misaligned ring is worse than one circle the two
-    // loadings take turns on. They never coexist regardless -- the registration ends
-    // before the draw opens, because the draw does not start counting until every
-    // mark has arrived.
-    if let Some(progress) = draw {
-        let origin = chooser::SELECTION_ARC_START.to_radians();
-        let radius = ring_radius + chooser::LOADING_ARC_GROWTH * scale;
-        context.begin_path();
-        if context
-            .arc(
-                player.x,
-                player.y,
-                radius,
-                origin - TWO_PI * progress,
-                origin,
-            )
-            .is_ok()
-        {
-            context.set_line_width(chooser::ARC_WIDTH * scale);
-            // The player's own colour, not a fixed pale one: a constant colour is
-            // orange against every hue that is not orange, so the fill looked like it
-            // belonged to whichever player happened to be orange.
-            context.set_stroke_style_str(&colour);
-            context.stroke();
-        }
     }
 }
 

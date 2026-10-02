@@ -615,39 +615,57 @@ fn the_mark_is_four_bands_in_measured_order() {
     assert!(gap - disc > 5.0, "the gap is wide enough to see");
     assert!(mark - gap > 5.0, "and so is the ring");
 
-    // The per-finger loading is the ring *itself* being drawn round, not an arc
-    // painted over a finished ring. The first version drew the full ring and then
-    // a near-white arc on top of it, which made the loading invisible -- not
-    // because the arc was faint, but because both were near-white, so it had
-    // nothing to reveal. The part of the ring that has not arrived must not be
-    // drawn at all.
+    // The ring is a *track* that always exists, and both loadings are drawn on top of
+    // it.
+    //
+    // This is the fix for a loading animation that was completely invisible: the
+    // ring was drawn in full and then an arc was painted over it, both in near-white
+    // colours, so the arc had nothing to reveal. The track has to be there first.
     assert!(
-        draw.contains("if loaded < 1.0 {") && draw.contains("TWO_PI * loaded"),
-        "the ring must be drawn only as far round as the mark has loaded"
+        draw.contains("let ring = player.ring_color()"),
+        "the ring's own tint must be drawn unconditionally, as a track for the \
+         loadings to fill"
     );
     assert!(
-        !draw.contains("RING_MIX_MARKER"),
-        "sanity: the drawing function is the one under test"
-    );
-    // And the loading arc must not be stroked as a full circle before the mark
-    // has loaded -- that is the bug in the shape this asserts against.
-    let full_ring_before_load = draw
-        .find("0.0, TWO_PI)")
-        .is_some_and(|full| draw.find("loaded").is_some_and(|l| l > full));
-    assert!(
-        !full_ring_before_load,
-        "no full ring may be drawn before the mark has loaded"
+        draw.contains("RING_STROKE_RADIUS * scale"),
+        "and at the middle of its measured band"
     );
 
-    // The two loadings are separate arcs, not one arc doing two jobs: the mark
-    // charges from its own touchdown, and the draw's arc sweeps afterwards.
+    // The two loadings must not share pixels, or the draw's fill covers the
+    // registration sweep and the first loading is invisible for the whole window.
     assert!(
-        draw.contains("player.registration") || draw.contains("loaded < 1.0"),
-        "the per-finger loading must be drawn"
+        draw.contains("LOADING_GROWTH"),
+        "the draw's arc must sit outside the ring so the two loadings never overlap"
     );
     assert!(
-        ui.contains("flood_front"),
-        "the flood must be a wipe down the screen, measured from the top edge"
+        !draw.contains("RING_STROKE_RADIUS * scale, 0.0, TWO_PI * progress)"),
+        "the draw's fill must not be drawn on the ring's own radius"
+    );
+
+    // Both loadings are driven by their own progress, not by one shared number: the
+    // per-finger one comes from the player's own registration and the draw's from
+    // the window.
+    assert!(
+        draw.contains("if let Some(loading) = loading")
+            && draw.contains("if let Some(progress) = draw"),
+        "the two loadings must be distinguishable in the drawing code"
+    );
+
+    // The per-finger loading is passed in as a fraction, so the mark grows into
+    // place rather than appearing at full size or snapping in.
+    assert!(
+        draw.contains("if let Some(loading) = loading"),
+        "the per-finger loading must reach the drawing code as a fraction"
+    );
+    // `paint` reads it off the player, not off a flag: the fraction belongs to the
+    // finger, so each mark charges from its own touchdown.
+    assert!(
+        ui.contains(".registration(timestamp)"),
+        "and it must come from the player's own registration, in paint"
+    );
+    assert!(
+        ui.contains("flood_radius"),
+        "the flood must be a disc growing from the winner's own mark"
     );
 
     // The colour, measured over saturated pixels from the native recordings.

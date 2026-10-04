@@ -133,13 +133,13 @@ pub const DRAWING_TIME_MS: f64 = 2400.0;
 
 /// How long one finger takes to load its own mark.
 ///
-/// 850ms, chosen rather than measured, and the user set it.
+/// 750ms, chosen rather than measured, and the user set it.
 ///
 /// The recordings show 620ms: the disc reaches full size in about 100ms and the
 /// sweep closes over the rest. This is a little longer than that, and deliberately
 /// so -- the sweep is two arcs meeting, which is legible as a gesture in a way one
 /// arc sweeping past is not, and it wants room to be read.
-pub const REGISTRATION_TIME_MS: f64 = 850.0;
+pub const REGISTRATION_TIME_MS: f64 = 750.0;
 
 /// The share of the registration during which the disc reaches full size.
 ///
@@ -1619,7 +1619,7 @@ mod tests {
     fn the_two_loadings_take_the_times_the_user_set() {
         // Both durations are the user's choice. Asserted here so a change to either
         // is deliberate.
-        assert!((REGISTRATION_TIME_MS - 850.0).abs() < 1e-9);
+        assert!((REGISTRATION_TIME_MS - 750.0).abs() < 1e-9);
         assert!((DRAWING_TIME_MS - 2400.0).abs() < 1e-9);
         // And the choice is still worth waiting for: several times the arrival, so
         // the two read as two stages rather than one gesture of two lengths.

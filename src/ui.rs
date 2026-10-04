@@ -8,9 +8,9 @@
 //! on screen. Every number it draws comes out of [`crate::chooser`], so the
 //! values the unit tests assert on are the values that reach the canvas.
 //!
-//! Nothing here is application JavaScript either. The page's one module script
-//! does a dynamic import of the generated bindings and this start function runs
-//! when they load; there is no manual wasm ABI and no handwritten app code.
+//! Nothing here is application JavaScript either: the page's one module script
+//! dynamically imports the generated bindings, and this start function runs when
+//! they load.
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -48,7 +48,7 @@ struct App {
 ///
 /// Held in a `RefCell` because a frame schedules the next one from inside the
 /// closure it is stored in, and parked in a thread-local for the life of the
-/// page: it is never dropped, and never replaced.
+/// page, so it is never dropped and never replaced.
 struct Frame {
     closure: RefCell<Closure<dyn FnMut(f64)>>,
 }
@@ -79,7 +79,7 @@ fn run() -> Result<(), JsValue> {
 
     // The canvas's drawing surface is its width and height in device pixels, and
     // assigning either clears it, so this happens before the first frame and
-    // on every resize.
+    // again on every resize.
     resize(&canvas);
 
     let app = Rc::new(RefCell::new(App {
@@ -168,9 +168,9 @@ fn start_loop(
     // building a `Closure` allocates a JS function, and a loop that forgets one
     // every frame leaks sixty of them a second until the tab dies.
     //
-    // The closure holds a `Weak` to its own `Rc`, so the cycle is broken and the
-    // loop is still "alive as long as the page is". `new_cyclic` is what makes
-    // that self-reference expressible at all.
+    // The closure holds a `Weak` to its own `Rc`, so the reference cycle is
+    // broken while the loop stays alive as long as the page is. `new_cyclic` is
+    // what makes that self-reference expressible at all.
     let frame = Rc::new_cyclic(|weak: &Weak<Frame>| {
         let weak = weak.clone();
         Frame {
@@ -254,8 +254,8 @@ fn paint(
     scale: f64,
 ) {
     // Everything below draws in CSS pixels. The canvas is `scale` times that in
-    // device pixels, and this transform is what makes a 40px circle land on 120
-    // pixels of glass instead of being stretched across 40.
+    // device pixels, and this transform is what makes a mark rasterise across
+    // 171 device pixels of glass instead of being stretched across 57.
     let _ = context.set_transform(scale, 0.0, 0.0, scale, 0.0, 0.0);
     let (width, height) = (
         f64::from(canvas.width()) / scale,
@@ -268,14 +268,8 @@ fn paint(
     if let Some(winner) = app.chosen() {
         if let Some(hole) = app.flood_hole(timestamp, width, height) {
             // A circle around the winner, filled with his colour everywhere OUTSIDE
-            // it, and its radius coming in.
-            //
-            // It is drawn as a hole rather than as a growing disc, which is the
-            // difference between the two shapes: a disc growing outwards starts at
-            // nothing and has to cross the screen, while a hole closing in starts by
-            // covering the screen and has only the middle left to take. Measured, the
-            // un-flooded radius around the winner is 242.7 CSS px while the flood is
-            // still only 2% of the screen, and then comes in to 124.8.
+            // it, and its radius coming in -- not a growing disc, which would start
+            // at nothing and have to cross the screen. See `Chooser::flood_hole`.
             match web_sys::Path2d::new() {
                 Ok(path) => {
                     path.rect(0.0, 0.0, width, height);
@@ -292,7 +286,7 @@ fn paint(
         }
         // The winner alone, at full pulse, and never a loading arc: the draw is
         // over, and an arc sweeping its ring would read as a second, still-running
-        // draw. It has already loaded, so it is drawn loaded.
+        // draw.
         draw_player(context, winner, pulse, None, None, true, app.draw_origin());
         return;
     }
@@ -300,16 +294,12 @@ fn paint(
     let progress = app.draw_progress(timestamp);
     for player in app.players() {
         // The first loading, as a raw fraction. The easing is applied once, in
-        // `draw_player`, and only to the disc.
+        // `draw_player`, and only to the disc -- applying a smoothstep twice is not
+        // a cosmetic slip: at a third of the way through the load the fraction is
+        // 0.29, the eased disc 0.23, and eased again 0.05, so the mark read as a
+        // black hole with a bright ring round it.
         //
-        // It was applied here as well, and applying a smoothstep twice is not a
-        // cosmetic slip: at a third of the way through the load the fraction is
-        // 0.29, the eased disc is 0.23, and eased again it is 0.05. The disc was
-        // being drawn at a twentieth of its size, so the mark read as a black hole
-        // with a bright ring round it.
-        //
-        // The arc is not eased at all. Measured, the sweep is linear, and easing it
-        // too would be inventing a curve the samples do not show.
+        // The arc is not eased at all. Measured, the sweep is linear.
         let loading = player.registration(timestamp);
         draw_player(
             context,
@@ -323,25 +313,21 @@ fn paint(
     }
 }
 
-/// One player: a pale dot, a coloured disc, a black gap and a pale ring, and the
-/// two arcs that load them.
+/// One player: a coloured disc, a black gap and a pale ring, and the ring's two
+/// loading arcs.
 ///
-/// The structure is measured, band by band, from the centre outward on a 1080px
-/// Galaxy S25 at 3x: pale dot to 7.7 CSS px, saturated disc to 35.7, black gap to
-/// 44.3, pale ring to 54.3.
-///
-/// The band order is the point. The disc and the ring are both the player's
-/// colour, so drawn edge to edge they merge into a single flat blob, which is
-/// what the build before last did; and dropping the gap and the ring entirely,
-/// which is what the last build did, leaves a dot on a disc with no structure
-/// around it. The gap is what separates them.
+/// The band order is the point, and the geometry in [`crate::chooser`] is what
+/// enforces it. The disc and the ring are both the player's colour, so drawn
+/// edge to edge they merge into a single flat blob; and dropping the gap and the
+/// ring leaves a disc with no structure around it. The gap is what separates them.
 fn draw_player(
     context: &web_sys::CanvasRenderingContext2d,
     player: &Player,
     pulse: f64,
     // `loading` is the finger's own registration, 0 to 1, or `None` once it has
     // arrived. `draw` is the draw window's progress, 0 to 1, or `None` when no draw
-    // is running. They are two separate numbers, deliberately: see `draw_player`.
+    // is running. They are two separate numbers on purpose: the ring and the draw
+    // window load at different times, from different origins.
     loading: Option<f64>,
     draw: Option<f64>,
     // Whether this player has been chosen. It is what makes the winner's ring keep
@@ -357,21 +343,17 @@ fn draw_player(
     let colour = player.color_of();
     // The whole mark breathes in the pulse.
     let scale = pulse;
-    // Each loading picks its own point on the ring to start from, and the sweep
-    // closes from both sides of it, finishing opposite.
-    //
-    // The origin is per mark, drawn from the CSPRNG when the finger landed, so a
-    // table of people putting fingers down together get a different answer each
-    // time rather than every ring filling in lockstep from 7:30.
+    // Each mark picks its own point on the ring to start from, drawn from the CSPRNG
+    // when the finger landed, so a table landing together does not fill in lockstep
+    // from the same place. The sweep closes from both sides of it, finishing
+    // opposite.
     let load_origin = player.load_origin;
     let draw_origin = app_draw_origin;
 
-    // The disc, and the disc alone, is what a finger puts on the glass.
-    //
-    // There is no ring until the ring has loaded. A mark that arrives as a disc
-    // already wearing its finished ring, with a second ring outside it sweeping to
-    // show progress, is two rings and a disc; the native app has a disc, and then
-    // the ring grows onto it.
+    // The disc, and the disc alone, is what a finger puts on the glass: there is no
+    // ring until the ring has loaded. A mark that arrives already wearing its
+    // finished ring is two rings and a disc; the native app has a disc, and then the
+    // ring grows onto it.
     let arrived = loading.map_or(1.0, Player::disc_arrival);
 
     context.begin_path();
@@ -388,29 +370,25 @@ fn draw_player(
     context.set_fill_style_str(&colour);
     context.fill();
 
-    // The ring, and the ring is the loading.
+    // The ring is the loading: drawn only as far round as the load has got, in the
+    // player's own colour, from that mark's own origin. Three things follow from the
+    // ring *being* the progress rather than a track with an arc over it:
     //
-    // It is drawn only as far round as the load has got, in the player's own colour,
-    // starting from the fixed 135 degrees. Three things follow from making the ring
-    // *be* the progress rather than a track with an arc over it:
-    //
-    // * there is no second ring. A mark is a disc and, while it is loading, part of
-    //   a ring -- not a disc, a finished ring, and a loading ring.
-    // * the ring cannot "flip back", because the ring is what arrives. There is no
-    //   pale overlay to be revealed when the load ends.
+    // * there is no second ring: a mark is a disc and, while it loads, part of a
+    //   ring;
+    // * the ring cannot "flip back", because the ring is what arrives -- there is no
+    //   pale overlay waiting to be revealed when the load ends;
     // * the selection loading is the same shape finishing its sweep, because it is
     //   the same ring.
     //
-    // The band is the ring's own, stroked at its centreline, which is the only
-    // radius at which the band lands on the band.
+    // Stroked at the band's own centreline, which is the only radius at which the
+    // band lands on the band.
     let ring_radius = chooser::RING_STROKE_RADIUS * scale;
 
-    // The loading sweep, from the fixed origin round as far as it has got. It ends
-    // at the origin rather than starting there, so its tail stays pinned to 7:30 and
-    // the leading edge is the thing that travels.
-    // The finished ring, in the player's colour darkened to 0.77. It is drawn
-    // whenever the ring is not mid-sweep -- which is to say, the whole time between
-    // the two loadings, and for ever after.
+    // Stroke an arc of the ring's band. The finished ring and the loading sweep are
+    // the same call with different angles and different colours, which is what makes
+    // the loading a colour settling rather than a shape appearing and being taken
+    // away.
     let draw_ring = |from: f64, to: f64, style: &str| {
         context.begin_path();
         if context
@@ -426,13 +404,10 @@ fn draw_player(
     let loaded = player.loading_color();
 
     if let Some(t) = loading {
-        // The first loading: the ring arrives, slightly brighter than it will rest,
-        // sweeping from the fixed origin round to closed.
-        //
-        // "Slightly brighter" is the point. The band is the ring's own, so the only
-        // thing that changes when the load ends is the ring settling from the
-        // loading tint to its resting one -- and it settles in the same place, so
-        // nothing can appear to vanish.
+        // The first loading: the ring arrives in a tint slightly brighter than it
+        // will rest at, sweeping from this mark's own origin round to closed. The
+        // band is the ring's own, so the only thing that changes when the load ends
+        // is that tint settling -- in the same place, so nothing can appear to vanish.
         for (from, to) in chooser::sweep_arcs(load_origin, t) {
             draw_ring(from, to, &loaded);
         }
@@ -441,13 +416,10 @@ fn draw_player(
 
     if let Some(t) = draw {
         // The second loading: it *covers* the ring the first one loaded, rather
-        // than being a second sweep that makes the loaded ring disappear and then
-        // loads again from nothing.
-        //
-        // So the resting ring is already drawn underneath at full darkness, and this
-        // fills the band in from the origin round to `t` in the player's own colour
-        // at full strength. The covered part keeps the ring's own tint underneath,
-        // so the difference between the two is a colour, not a length.
+        // than making the loaded ring disappear and loading again from nothing. So
+        // the resting ring is drawn underneath at full darkness and this fills the
+        // band in from the origin round to `t` at full strength: the difference
+        // between the two is a colour, not a length.
         draw_ring(0.0, TWO_PI, &ring);
         for (from, to) in chooser::sweep_arcs(draw_origin, t) {
             draw_ring(from, to, &colour);
@@ -462,10 +434,6 @@ fn draw_player(
     // different moments, and they must not look the same: a player waiting for the
     // draw is still loading their ring, and a player who has won has a ring that
     // filled up with their colour and stays that way.
-    //
-    // It used to fall through to the resting tint either way, so the winner's ring
-    // dimmed the instant the window closed -- the charge visibly discharging,
-    // which is the opposite of what being chosen should look like.
     if app_is_chosen {
         draw_ring(0.0, TWO_PI, &colour);
         return;
@@ -482,13 +450,12 @@ fn draw_player(
 /// deliberate.
 ///
 /// Straight from the CSPRNG rather than through `random_index`, which is for
-/// choosing a player: that has to be unbiased over the players *present*, which is
-/// a different question from being unbiased over a circle, and reusing it would put
-/// a modulo in the middle of a floating-point scale for no reason.
+/// choosing a player: that has to be unbiased over the players *present*, a
+/// different question from being unbiased over a circle.
 fn random_angle() -> f64 {
     // A failed draw falls back to a fixed angle rather than to a different one per
-    // attempt: this is decoration, and a CSPRNG that is refusing is not something to
-    // retry inside a pointer event.
+    // attempt: a CSPRNG that is refusing is not something to retry inside a pointer
+    // event.
     let Ok(word) = getrandom::u64() else {
         return 0.0;
     };
@@ -703,9 +670,9 @@ fn register_service_worker() {
 /// origin -- each is scoped to its own directory, and a sibling that never
 /// covered us is not ours to remove.
 ///
-/// Failures are ignored on purpose. This is best-effort cleanup of state this
-/// app did not create, and a browser that refuses leaves the user no worse
-/// off: the app still runs and still caches its own assets.
+/// Failures are ignored on purpose: this is best-effort cleanup of state this
+/// app did not create, and a browser that refuses leaves the app still running
+/// and still caching its own assets.
 async fn release_stale_registrations(window: &web_sys::Window) {
     let container = window.navigator().service_worker();
     let Ok(registrations) = JsFuture::from(container.get_registrations()).await else {

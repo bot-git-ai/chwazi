@@ -20,8 +20,7 @@
 # is a wasm that predates the source sitting next to a fresh `index.html`. Run
 # this after every release.
 #
-# `wasm-bindgen` must be exactly the version pinned in Cargo.toml (0.2.128); in a
-# bare or non-login shell call it by absolute path.
+# `wasm-bindgen` must be exactly the version pinned in Cargo.toml (0.2.128).
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

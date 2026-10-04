@@ -11,9 +11,8 @@
 //! anything, so those assertions are gone rather than skipped.
 //!
 //! What covers the built output is running the two build steps, in the order
-//! AGENTS.md gives them. `.github/workflows/build.yml` does exactly that on
-//! every push and then inspects what came out, so the assertions about the
-//! *shape* of the site are made here against the sources that produce it.
+//! AGENTS.md gives them: `.github/workflows/build.yml` does exactly that on every
+//! push and then inspects what came out.
 
 use std::path::Path;
 
@@ -40,11 +39,10 @@ fn worker() -> String {
 
 /// Rust source with every comment removed, for substring assertions.
 ///
-/// A test that asserts on source text is asserting on the wrong thing if it can be
-/// satisfied by a comment. A doc comment naming a call satisfies a substring check
-/// with the call deleted, which is the failure mode that matters here: the drawing
-/// code is wasm-only and cannot be unit-tested on the host, so these tests are the
-/// only automated check it has.
+/// A test that asserts on source text is asserting on the wrong thing if a comment
+/// can satisfy it: a doc comment naming a call passes a substring check with the
+/// call deleted. That matters here because the drawing code is wasm-only and cannot
+/// be unit-tested on the host, so these tests are the only automated check it has.
 ///
 /// Deliberately simple: it strips `//` to end of line and `/* ... */`, and does not
 /// try to understand string literals. A `//` inside a string would end the "comment"
@@ -138,9 +136,8 @@ fn the_page_loads_generated_bindings_not_a_manual_wasm_abi() {
         page.contains("user-scalable=no"),
         "the page must keep the original viewport"
     );
-    // And the touch rule needs the CSS as well as the listener, because a
-    // browser that honours `touch-action` never fires the scroll it would
-    // otherwise have to cancel.
+    // And the touch rule needs the CSS as well as the listener: a browser that
+    // honours `touch-action` never fires the scroll it would otherwise cancel.
     assert!(
         page.contains("touch-action: none"),
         "touch-action must keep the page from scrolling under a finger"
@@ -247,8 +244,8 @@ fn the_worker_never_answers_outside_its_own_directory() {
         worker.contains("new URL('./', self.location.href)"),
         "the worker must resolve its own directory from its location"
     );
-    // The guard is a prefix test against that directory, on the request URL,
-    // applied before the allowlist decides anything.
+    // A prefix test against that directory, on the request URL, applied before the
+    // allowlist decides anything.
     assert!(
         worker.contains("IS_OWN(url)"),
         "the fetch handler must check the request is inside this app's directory; \
@@ -358,7 +355,6 @@ fn every_precached_file_is_published_by_the_build() {
 
     let published = published_files();
     for asset in &assets {
-        // `'./'` is the scope root, which is `index.html` on disk.
         let name = if asset == "./" { "index.html" } else { asset };
         assert!(
             published.iter().any(|file| file == name),
@@ -414,7 +410,6 @@ fn published_files() -> Vec<String> {
     let build = std::fs::read_to_string(root().join("build.rs")).expect("build.rs");
     let mut files = Vec::new();
 
-    // `("index.html", "src/ui.html")` — the copied shell files.
     for line in build.lines() {
         let line = line.trim();
         let Some(rest) = line.strip_prefix("(\"") else {
@@ -426,8 +421,6 @@ fn published_files() -> Vec<String> {
         files.push(name.to_string());
     }
 
-    // The derived names: the two icons at the sizes ICON_SIZES lists, plus the
-    // manifest and the worker.
     if let Some(sizes) = build
         .lines()
         .find(|line| line.trim_start().starts_with("const ICON_SIZES"))
@@ -443,9 +436,9 @@ fn published_files() -> Vec<String> {
             }
         }
     }
-    // The derived names are in a plain array rather than buried in the calls
-    // that push them, so a file the build stopped publishing is a line missing
-    // from a list anyone can read.
+    // `derived` is a plain array rather than buried in the calls that push them,
+    // so a file the build stopped publishing is a line missing from a list anyone
+    // can read.
     if let Some(start) = build.find("let derived = [") {
         let body_start = start + "let derived = [".len();
         let end = build[body_start..]
@@ -496,8 +489,8 @@ fn no_user_visible_text_names_the_implementation() {
         );
     }
 
-    // And the same for the half of the UI that Rust writes into the DOM, which
-    // this test can only reach as source.
+    // And the same for the half of the UI that Rust writes into the DOM, which this
+    // test can only reach as source.
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
     for string in string_literals(&ui) {
         let shows_in_the_ui = string.contains("could not start")
@@ -589,8 +582,9 @@ fn string_literals(source: &str) -> Vec<String> {
 fn the_mark_is_three_bands_in_measured_order() {
     let ui = std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs");
 
-    // Scoped to the drawing function: `DOT_COLOUR` is referenced in more than one
-    // place, so searching the whole file would compare offsets from the wrong one.
+    // Scoped to `draw_player`: the constants below appear in more than one place in
+    // this file, so searching the whole file would compare offsets from the wrong
+    // one.
     let draw = ui
         .split("fn draw_player(")
         .nth(1)
@@ -601,19 +595,16 @@ fn the_mark_is_three_bands_in_measured_order() {
 
     // Three bands, and no dot.
     //
-    // The dot is the important half: a small pale circle at the centre of every
+    // The dot is the important half. A small pale circle at the centre of every
     // mark looks entirely plausible -- it is the most distinctive thing in the
     // reference recordings, it sits at the exact centre, and a radial scan finds it
-    // first. It is Android's "show touches" indicator, not the app's. It is the same
-    // colour in every mark whatever that mark's own colour, and it does not move,
-    // grow or pulse with the mark. On an indicator-off recording it is absent.
+    // first. It is Android's "show touches" indicator, not the app's: the same
+    // colour in every mark whatever that mark's own colour, and it never moves,
+    // grows or pulses with the mark. On an indicator-off recording it is absent.
     //
-    // Checked on the *stripped* source, and on the drawing function rather than the
-    // whole file, for two reasons that are both about tests that cannot fail. A
-    // literal radius reintroduces the dot without the name `DOT_RADIUS` anywhere, so
-    // a name check alone lets it straight through -- which it did, the first time
-    // this assertion was written. And a doc comment naming the call satisfies a
-    // substring assertion with the call deleted.
+    // Checked on the *stripped* source, because a literal radius reintroduces the
+    // dot without the name `DOT_RADIUS` anywhere -- which is how it first came
+    // back, with a name check alone letting it through.
     let code = strip_rust_comments(draw);
     assert!(
         !code.contains("DOT_RADIUS"),
@@ -628,8 +619,7 @@ fn the_mark_is_three_bands_in_measured_order() {
         "only the disc is filled; the dot was a second fill, and there are {fills}"
     );
     // Draw order: the disc first, then one radius on which the ring is drawn in
-    // whichever of its three states is current. The loading structure is pinned in
-    // `the_two_loadings_are_different_gestures`.
+    // whichever of its three states is current.
     let disc = draw
         .find("DISC_RADIUS * scale * arrived")
         .expect("the disc");
@@ -649,11 +639,11 @@ fn the_mark_is_three_bands_in_measured_order() {
     // The ring is stroked at the band's *centreline*, at its own width.
     //
     // Both halves of that matter and they are different mistakes. Stroking at the
-    // disc's edge merges the ring into the disc, which is what the build before
-    // last did. Stroking at the band's *outer* edge instead lays the band from
-    // 49.8 to 58.8 CSS px -- outside the measured mark, and leaving 4.5px of the
-    // gap showing as a second black band -- which is "the gap is too big", and it
-    // is invisible in the constants because every number in it is correct.
+    // disc's edge merges the ring into the disc. Stroking at the band's *outer* edge
+    // instead lays the band from 49.8 to 58.8 CSS px -- outside the measured mark,
+    // and leaving 4.5px of the gap showing as a second black band -- which is "the
+    // gap is too big", and it is invisible in the constants because every number in
+    // it is correct.
     assert!(
         draw.contains("RING_STROKE_RADIUS * scale"),
         "the ring must be stroked at the middle of its band, not at its edge"
@@ -663,7 +653,6 @@ fn the_mark_is_three_bands_in_measured_order() {
         "and at the width of the band itself"
     );
 
-    // The gap is the difference between the two bands, and it has to be visible.
     let chooser = std::fs::read_to_string(root().join("src/chooser.rs")).expect("chooser.rs");
     let constant = |name: &str| -> f64 {
         chooser
@@ -673,8 +662,7 @@ fn the_mark_is_three_bands_in_measured_order() {
             .and_then(|n| n.trim().parse().ok())
             .unwrap_or_else(|| panic!("{name}"))
     };
-    // Measured on a frame recorded with the touch indicator OFF, which is the only
-    // kind of frame these numbers are valid on.
+    // Measured on an indicator-off frame, the only kind these numbers are valid on.
     let (disc, gap, mark) = (
         constant("DISC_RADIUS"),
         constant("GAP_OUTER_RADIUS"),
@@ -693,10 +681,6 @@ fn the_mark_is_three_bands_in_measured_order() {
     assert!(gap - disc > 5.0, "the gap is wide enough to see");
     assert!(mark - gap > 5.0, "and so is the ring");
 
-    // The ring is drawn on its own band's centreline, and it is the same shape whether
-    // it is complete or still sweeping -- see `a_mark_is_a_disc_and_then_the_ring_
-    // itself_loads`, which is where the loading structure is pinned.
-
     // The per-finger loading is passed in as a fraction, so the mark grows into
     // place rather than appearing at full size or snapping in.
     assert!(
@@ -706,10 +690,8 @@ fn the_mark_is_three_bands_in_measured_order() {
 
     // Neither loading may be drawn in a fixed pale colour.
     //
-    // A constant colour is orange against every hue that is not orange, so the sweep
-    // and the fill looked like they belonged to whichever player happened to be
-    // orange rather than to the finger that had just landed. Both must ask the
-    // player for their own colour.
+    // A constant colour is orange against every hue that is not orange, so the
+    // sweep and the fill would belong to whichever player happened to be orange.
     for fixed in ["DOT_COLOUR", "LOADING_COLOR"] {
         assert!(
             !code.contains(fixed),
@@ -718,8 +700,7 @@ fn the_mark_is_three_bands_in_measured_order() {
     }
     // Both loadings ask the player for its own colours: the registration draws the
     // ring slightly brighter than it will rest, and the draw window covers that ring
-    // in the player's colour at full strength. A fixed pale colour would be orange
-    // against every hue that is not orange.
+    // in the player's colour at full strength.
     assert!(
         code.contains("player.loading_color()") && code.contains("player.ring_color()"),
         "both loadings must take their colours from the player"

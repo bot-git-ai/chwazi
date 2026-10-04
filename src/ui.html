@@ -2,8 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- The original's viewport: a finger chooser is a pass-the-phone-around game,
-     so pinch-zoom must not be reachable by a stray second finger. -->
+<!-- The original's viewport: a stray second finger must not reach pinch-zoom. -->
 <meta name="viewport" content="width=device-width, user-scalable=no, maximum-scale=1.0, minimum-scale=1.0, initial-scale=1.0">
 <meta name="theme-color" content="#000000">
 <meta name="color-scheme" content="dark">
@@ -15,8 +14,7 @@
 <style>
 /* The original's stylesheet, unchanged: one black surface, no scroll, no
    browser gestures fighting the fingers that are the whole point. `touch-action`
-   is the belt to `touchmove`'s braces -- a browser that honours it never
-   scrolls or pinch-zooms in the first place. */
+   is the belt to `touchmove`'s braces. */
 html, body, canvas { margin: 0; padding: 0; height: 100%; width: 100%; background: #000; overflow: hidden; touch-action: none; }
 body { color: #fff; }
 /* Off screen, but not `display: none`: the state of the draw is announced to a
@@ -32,9 +30,8 @@ body { color: #fff; }
 </style>
 </head>
 <body>
-<!-- One canvas, filling the window. Rust sizes it from the window on load and
-     on every resize, and draws every frame into it; the page holds no other
-     visible content at all. -->
+<!-- The canvas is the whole interface: Rust sizes it from the window on load
+     and on every resize, and draws every frame into it. -->
 <canvas id="main" role="img" aria-label="Coloured circles, one per finger touching the screen. The circle that wins fills the screen in its colour."></canvas>
 <!-- The draw's state, for anyone who cannot see the canvas. -->
 <p id="status" class="visually-hidden" role="status" aria-live="polite">Loading Chwazi&hellip;</p>

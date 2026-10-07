@@ -155,8 +155,8 @@ either case.
 
 `assets/icon.svg` is the app's own drawing of the **Chwazi brand mark**: a black
 square carrying the same 2×2 dot grid as the official Chwazi app — the chosen
-dot yellow, the other three teal — drawn as four extruded pucks, white rim
-highlight top-left, darker extruded side below. It is the committed source of
+dot yellow, the other three blue — drawn flat: four circles, no shading. It is
+the committed source of
 truth: never deleted, never replaced by a PNG. `build.rs` rasterizes the 192 and
 512 install PNGs from it with `usvg` + `resvg` + `tiny-skia` and copies the SVG
 itself into `dist/`, so the

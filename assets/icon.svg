@@ -1,35 +1,14 @@
-<!-- Chwazi brand mark, redrawn from the official app icons (Google Play and
-     the App Store): a full-bleed black tile carrying the same 2x2 grid of
-     finger dots, each drawn as an extruded puck: a darker cylinder side below
-     and a white rim highlight on the top-left. The top-left dot is yellow, the
-     one a draw would pick; the other three are teal. Colours and geometry are
-     sampled from the Play Store icon: puck radius 47.7, face offset (5.9,
-     0.4), dark side offset (3.5, 13.4) at radius 51.7, grid steps 206.5 and
-     195. -->
+<!-- Chwazi brand mark, flat variant: the 2x2 dot grid of the official app
+     icons (App Store proportions), without the 3D puck extrusion. Four flat
+     circles on a black tile, the top-left yellow (the chosen one) and the
+     other three blue. Geometry from the App Store icon: dot radius 50.6 at
+     (256 plus or minus 103.3, 256 plus or minus 93.3). Colours are
+     user-chosen: pure blue #0000ff in place of the store teal, and a clean
+     untinted yellow #ffea00 in place of the store amber. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <rect width="512" height="512" fill="#000000"/>
-  <!-- top-left: the chosen one -->
-  <g transform="translate(148.6 142.6)">
-    <circle cx="3.5" cy="13.4" r="51.7" fill="#997906"/>
-    <circle r="47.7" fill="#ffffff"/>
-    <circle cx="5.9" cy="0.4" r="47.9" fill="#ffc90a"/>
-  </g>
-  <!-- top-right -->
-  <g transform="translate(355.1 142.6)">
-    <circle cx="3.5" cy="13.4" r="51.7" fill="#317679"/>
-    <circle r="47.7" fill="#ffffff"/>
-    <circle cx="5.9" cy="0.4" r="47.9" fill="#51c4ca"/>
-  </g>
-  <!-- bottom-left -->
-  <g transform="translate(148.6 337.6)">
-    <circle cx="3.5" cy="13.4" r="51.7" fill="#317679"/>
-    <circle r="47.7" fill="#ffffff"/>
-    <circle cx="5.9" cy="0.4" r="47.9" fill="#51c4ca"/>
-  </g>
-  <!-- bottom-right -->
-  <g transform="translate(355.1 337.6)">
-    <circle cx="3.5" cy="13.4" r="51.7" fill="#317679"/>
-    <circle r="47.7" fill="#ffffff"/>
-    <circle cx="5.9" cy="0.4" r="47.9" fill="#51c4ca"/>
-  </g>
+  <circle cx="152.7" cy="162.7" r="50.6" fill="#ffea00"/>
+  <circle cx="359.3" cy="162.7" r="50.6" fill="#0000ff"/>
+  <circle cx="152.7" cy="349.3" r="50.6" fill="#0000ff"/>
+  <circle cx="359.3" cy="349.3" r="50.6" fill="#0000ff"/>
 </svg>

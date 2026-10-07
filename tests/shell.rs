@@ -951,8 +951,8 @@ fn dist_is_ignored() {
 #[test]
 fn the_committed_icon_is_the_chwazi_brand_mark() {
     let icon = std::fs::read_to_string(root().join("assets/icon.svg")).expect("assets/icon.svg");
-    // The official mark: a black tile with a 2x2 grid of dots, the chosen one
-    // yellow and the other three teal, in the store-icon colours.
+    // The mark: a black tile with a 2x2 grid of four flat dots, the chosen one
+    // yellow and the other three blue, in the user-chosen colours.
     assert!(
         icon.contains("viewBox=\"0 0 512 512\""),
         "the icon is a 512-unit tile"
@@ -961,20 +961,17 @@ fn the_committed_icon_is_the_chwazi_brand_mark() {
         icon.contains("fill=\"#000000\""),
         "the tile is black, edge to edge, like the app"
     );
-    assert!(
-        icon.contains("#ffc90a"),
+    assert_eq!(
+        icon.matches("fill=\"#ffea00\"").count(),
+        1,
         "exactly one yellow dot: the chosen one"
     );
     assert_eq!(
-        icon.matches("#51c4ca").count(),
+        icon.matches("fill=\"#0000ff\"").count(),
         3,
-        "three teal dots: the not-chosen ones"
+        "three blue dots: the not-chosen ones"
     );
-    assert_eq!(icon.matches("<circle").count(), 12, "four pucks, three circles each");
-    assert!(
-        icon.contains("#ffffff"),
-        "each puck carries the white rim highlight"
-    );
+    assert_eq!(icon.matches("<circle").count(), 4, "four flat dots, nothing else");
     // It is published, not just committed: the shell links it and the worker
     // precaches it, so `build.rs` has to copy it.
     assert!(

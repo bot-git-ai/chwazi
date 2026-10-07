@@ -967,9 +967,9 @@ fn the_committed_icon_is_the_chwazi_brand_mark() {
         "exactly one yellow dot: the chosen one"
     );
     assert_eq!(
-        icon.matches("fill=\"#0000ff\"").count(),
+        icon.matches("fill=\"#00a2ff\"").count(),
         3,
-        "three blue dots: the not-chosen ones"
+        "three azure blue dots: the not-chosen ones"
     );
     assert_eq!(icon.matches("<circle").count(), 4, "four flat dots, nothing else");
     // It is published, not just committed: the shell links it and the worker

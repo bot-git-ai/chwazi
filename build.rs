@@ -104,9 +104,9 @@ fn main() {
 
 /// Rasterize `assets/icon.svg` at each install size.
 ///
-/// The author's original Material Symbols `touch_long`, kept byte for byte: the
-/// committed, authoritative, hand-editable icon. These PNGs are build output
-/// derived from it, which is why neither exists in the tree between builds.
+/// The Chwazi brand mark, drawn from the official store icons: the committed,
+/// authoritative, hand-editable icon. These PNGs are build output derived from
+/// it, which is why neither exists in the tree between builds.
 ///
 /// Rendered straight to each size rather than rasterized at 512 and downscaled:
 /// the source is a 48-unit viewBox, so both renders are exact and differ only in

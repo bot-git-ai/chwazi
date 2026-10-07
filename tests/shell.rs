@@ -944,26 +944,36 @@ fn dist_is_ignored() {
     assert!(ignored, "dist/ must be in .gitignore");
 }
 
-/// The committed icon is the author's original, and this pins it. A rewrite that
-/// redrew it would be a redesign, and the PNGs derived from a redrawn SVG would
-/// carry the redrawing into every install icon silently — the difference is only
-/// ever visible on a home screen.
+/// The committed icon is the Chwazi brand mark, and this pins its essentials. A
+/// regression to some other drawing would be a redesign nobody asked for, and
+/// the PNGs derived from the SVG would carry it into every install icon
+/// silently — the difference is only ever visible on a home screen.
 #[test]
-fn the_committed_icon_is_the_authors_original() {
-    let icon = std::fs::read(root().join("assets/icon.svg")).expect("assets/icon.svg");
+fn the_committed_icon_is_the_chwazi_brand_mark() {
+    let icon = std::fs::read_to_string(root().join("assets/icon.svg")).expect("assets/icon.svg");
+    // The official mark: a black tile with a 2x2 grid of dots, the chosen one
+    // yellow and the other three teal, in the store-icon colours.
+    assert!(
+        icon.contains("viewBox=\"0 0 512 512\""),
+        "the icon is a 512-unit tile"
+    );
+    assert!(
+        icon.contains("fill=\"#000000\""),
+        "the tile is black, edge to edge, like the app"
+    );
+    assert!(
+        icon.contains("#ffc90a"),
+        "exactly one yellow dot: the chosen one"
+    );
     assert_eq!(
-        icon.len(),
-        1144,
-        "assets/icon.svg must be the original, byte for byte"
+        icon.matches("#51c4ca").count(),
+        3,
+        "three teal dots: the not-chosen ones"
     );
-    let icon = String::from_utf8(icon).expect("the icon is text");
+    assert_eq!(icon.matches("<circle").count(), 12, "four pucks, three circles each");
     assert!(
-        icon.contains("touch_long"),
-        "the original icon is Material Symbols \"touch_long\""
-    );
-    assert!(
-        icon.contains("fill: #434343"),
-        "and it is the original's #434343, on transparent"
+        icon.contains("#ffffff"),
+        "each puck carries the white rim highlight"
     );
     // It is published, not just committed: the shell links it and the worker
     // precaches it, so `build.rs` has to copy it.

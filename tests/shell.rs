@@ -883,12 +883,22 @@ fn the_manifest_keeps_the_originals_name_and_fullscreen_display() {
             "{constant} must be {expected}, to keep the original manifest: {line}"
         );
     }
-    for key in ["\"id\"", "\"start_url\"", "\"scope\""] {
+    for key in ["\"start_url\"", "\"scope\""] {
         assert!(
             build.contains(&format!("{key}: \"./\"")),
             "{key} must be \"./\" so the site mounts anywhere"
         );
     }
+    // The manifest must declare no `id`. The member is resolved against
+    // start_url's *origin*, not the manifest's directory, so a literal `"./"`
+    // would give every app in the family the same identity: Android would
+    // treat them all as one app, and the second install would be swallowed as
+    // an update of the first. Left out, identity falls back to `start_url` --
+    // the app's own mount point, unique per app.
+    assert!(
+        !build.contains("\"id\""),
+        "the manifest must not declare an id: \"./\" resolves to the bare origin and collides with every sibling app"
+    );
     assert!(
         build.contains("\"purpose\": \"any maskable\""),
         "the install icons must be declared maskable"
@@ -971,7 +981,11 @@ fn the_committed_icon_is_the_chwazi_brand_mark() {
         3,
         "three azure blue dots: the not-chosen ones"
     );
-    assert_eq!(icon.matches("<circle").count(), 4, "four flat dots, nothing else");
+    assert_eq!(
+        icon.matches("<circle").count(),
+        4,
+        "four flat dots, nothing else"
+    );
     // It is published, not just committed: the shell links it and the worker
     // precaches it, so `build.rs` has to copy it.
     assert!(

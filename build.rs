@@ -165,7 +165,6 @@ fn manifest() -> String {
         })
         .collect();
     let manifest = serde_json::json!({
-        "id": "./",
         "name": NAME,
         "short_name": SHORT_NAME,
         "start_url": "./",

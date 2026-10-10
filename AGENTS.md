@@ -175,8 +175,17 @@ rasterized. `name` ("Chwazi Finger Chooser"), `short_name` ("Chwazi") and
 `display` (`fullscreen`) are the original's. The original declared no colours at
 all, so these are new and were chosen for one reason: **black**, because the app
 is black from edge to edge, and a black splash is the only colour that does not
-flash white between the launcher and the first frame. `id`, `start_url` and
-`scope` are all `"./"`.
+flash white between the launcher and the first frame. `start_url` and `scope`
+are both `"./"`.
+
+The manifest declares **no `id`**. The member is the app's install identity, and
+it is resolved against `start_url`'s *origin*, not the manifest's directory —
+so the literal `"./"` this repo once shipped resolved to the bare
+`wdomitrz.github.io` for every app in the family at once. Android treats a
+manifest whose id matches an installed app as an update of that app, not a new
+one, which is why the second app in the family refused to install while the
+first was present. Left out, identity falls back to `start_url` — this app's
+own mount point — which is exactly the identity the original manifest produced.
 
 ## Tests
 

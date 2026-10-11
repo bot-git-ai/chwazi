@@ -235,7 +235,11 @@ strays, no unsubstituted `__VERSION__`, bindings that export.
 - `ui.html`: the static shell. One black canvas, one module script whose whole
   body is `import('./app.js').then(m => m.default())`, and a hidden failure UI.
 - `service-worker.js`: caches only a fixed app-shell allowlist, scope-specific
-  content-versioned cache, atomic install, no `skipWaiting`.
+  content-versioned cache, atomic install, and a `skipWaiting` that answers
+  only the page's `SKIP_WAITING` message. The page asks (`ui.rs`'s
+  `nudge_worker_update`) and reloads on `controllerchange`: an installed copy
+  updates on its next open, no update waits for a visit that never comes, and
+  no page is ever swapped under without having asked.
 - `build.rs`: writes the six files it owns into `dist/`, deriving the worker's
   cache version from the bytes of the other seven.
 

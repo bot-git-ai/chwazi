@@ -1,10 +1,11 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 // Browser lifecycle/cache plumbing only; all chooser/app logic remains Rust.
-// An update waits for the old tabs to close rather than swapping the wasm under
-// one that is live, which for an app whose entire state is a single wasm module
-// means half old code drawing over half new code. So there is no skipWaiting
-// call here, and the test checks for the call and not the bare word.
+// An update never swaps itself under a live page unasked: left alone it waits
+// for every page it controls to close, because an app whose entire state is
+// one wasm module must not run half old code under half new. The one ask that
+// exists comes from this app's own page (see `message` below), which reloads
+// as the handover happens, so no page ever straddles the two versions.
 // The fetch handler answers only for a URL inside this app's own directory,
 // checked on every request rather than assumed from the scope: scope is a
 // registration's claim, not a promise, and these apps share one origin with
@@ -21,6 +22,15 @@ const IS_OWN = url => url.startsWith(ROOT.href);
 const MANIFEST = new URL('manifest.webmanifest', ROOT).href;
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
+});
+// The page's ask. `nudge_worker_update` in `ui.rs` sends this when it has a
+// worker installed and waiting: this worker takes over at once, and the page
+// — the sender — hears the resulting `controllerchange` and reloads. A page
+// that never asks is never swapped, which keeps the guarantee above; the
+// message is the ask, and it comes from the one client that immediately
+// steps out of the way.
+self.addEventListener('message', event => {
+  if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {

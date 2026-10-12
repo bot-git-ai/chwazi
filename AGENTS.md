@@ -8,7 +8,7 @@ application logic, state and rendering are Rust. `cargo build` generates the
 with no server and no runtime dependency on a binary. Nothing is stored, nothing
 is sent anywhere.
 
-AGPL-3.0-only. See `LICENSE`.
+AGPL-3.0-only: see `LICENSE`.
 
 This is a standalone, private repository, seeded with the history of the public
 JavaScript PWA it replaces (`github.com/wdomitrz/chwazi`). The rewrite keeps the
@@ -31,14 +31,9 @@ cargo build --release --locked
 ```
 
 Step 1 writes `dist/app.js` and `dist/app_bg.wasm`; step 2 adds the six files
-`build.rs` owns. The order matters: step 2's cache hash covers the wasm, so
-running it first would pin a version to whatever the previous build left behind.
-
-The `touch build.rs` is not redundant. `build.rs` writes into the source tree
-rather than `OUT_DIR`, so Cargo cannot see that anything changed and will not
-re-run it for a second identical invocation, leaving a `dist/` with the two wasm
-artefacts and none of the six shell files — the exact half-built site this shape
-of project has already had.
+`build.rs` owns. The order matters (step 2's cache hash covers the wasm), and
+the `touch build.rs` is not redundant — the reasons are told where they bite, in
+`build.rs`, `build-site.sh` and the workflow that runs the steps.
 
 `wasm-bindgen` is pinned to `=0.2.128` in `Cargo.toml` and must match the CLI
 exactly; a mismatched generator emits bindings the runtime will not load, and the
@@ -80,76 +75,29 @@ any subdirectory.
 
 ## Timings and sizes, measured
 
-These are **measured off screen recordings of the native app**, not chosen. Where
-each number came from is recorded, because a number nobody can re-derive is a
-number nobody can correct.
-
-| | value | measured from |
-|---|---|---|
-| `SCALING_PERIOD_MS` | 1000 | pixel area peaks at 1.07s, 2.03s, 3.03s, 4.03s → 0.99s apart |
-| `MAX_PULSE_SCALE` | 0.07 | area varies 1.33:1; area ∝ r², so the radius swings 1.15:1 |
-| whole mark | 80 CSS px across | a player circle is 241 native px on a 1080px/3x screen |
-| `MARK_RADIUS` | 40 | that circle's outer edge, measured on every clean frame |
-| `DOT_RADIUS` | 6.5 | the pale dot at its centre, measured the same way |
-| `DOT_COLOUR` | rgb(251,242,186) | sampled from the dot itself |
-| `COLOUR_LIGHTNESS` | 49% | median over 1184 saturated pixels; the web app's 40% |
-| `ARC_WIDTH` | 12 | the original's, unchanged |
-| `CHOSEN_PLAYER_ANIMATION_TIME_MS` | 180 | the fill is complete 5 frames into 6 at 60fps |
-| `FILL_FRACTION` | 0.5 | same: 5%, 51%, 83%, done — done by the halfway point |
-| `DRAWING_TIME_MS` | 2500 | the original's, kept |
-| `RESTART_DELAY` | 2000 | the original's, kept |
-
-The two that changed most are the pulse and the reveal, and both changed for the
-same reason: the original's values are a third to a quarter again as slow as the
-app people actually use.
-
-**The mark is a solid disc with a pale dot at its centre.** That is all of it: no
-gap, no separate ring, and the colour runs unbroken from 13 to 36 CSS px with black
-outside 40.
-
-Two builds have now got this wrong, in opposite directions, and both were caught by
-the recordings rather than by reasoning. The first merged a disc and a ring painted
-edge to edge in one colour, which is a blob. The second "fixed" that by inserting a
-3px black gap and a separate ring -- which the native app does not have either; I had
-read them off a blurred 340px crop of a frame where two circles happened to overlap.
-
-The white dot is what settled it, and for a reason worth keeping: it gives a frame
-of video an unambiguous centre to scan radially from. Scanning out from the dot
-shows one solid disc and nothing else, which no amount of squinting at a thumbnail
-had managed to establish.
-
-The dot is also why it *looks* the way it does rather than merely measuring right: a
-disc of colour with a bright centre reads as a bead of light, which on a black screen
-is the whole impression. `tests/shell.rs` pins the draw order, the sizes, the
-lightness, and the absence of `destination-out` -- so a ring that comes back as a
-draw call rather than as a constant cannot slip through.
+Every timing, radius and colour this app draws is a named constant in
+`src/chooser.rs`, and each constant's own doc comment records where its number
+came from — recordings of the native app, indicator-off frames, or a choice the
+user made. Read them there: a number nobody can re-derive is a number nobody can
+correct, and the doc comment is where the derivation lives. Two builds got the
+mark's shape wrong in opposite directions before the recordings settled it; that
+story, and the draw order it pins, are told on the constants and asserted by
+`tests/shell.rs`.
 
 **Smoothness is resolution, not anti-aliasing.** The canvas is sized to
-`innerWidth × devicePixelRatio` (capped at 3) and drawn through a transform of the
-same ratio, so a 40px circle is rasterised across 120 device pixels rather than
-40 and stretched by the compositor. Sizing it in CSS pixels -- as this did, and as
-the 2013 original did -- is visible as jagged edges on any modern phone. All the
-arithmetic stays in CSS pixels, so no constant and no test changed with it.
+`innerWidth × devicePixelRatio` (capped at 3) and drawn through a transform of
+the same ratio, so a 40px circle is rasterised across 120 device pixels rather
+than 40 and stretched by the compositor. Sizing it in CSS pixels -- as this did,
+and as the 2013 original did -- is visible as jagged edges on any modern phone.
+All the arithmetic stays in CSS pixels, so no constant and no test changed with
+it.
 
-**The reveal is a smoothstep over the first half, then a hold.** Measured 5%, 51%,
-83%, complete across five frames — so the fill is done at the halfway point and
-the rest of the window is the winner resting in its own colour. That is why the
-native one reads as a snap rather than a sweep, and it is not something a shorter
-duration alone would have got: a *linear* radius is fastest exactly where the
-screen is densest, so it appears to stall halfway.
-
-`MIN_WINNER_RADIUS` is derived from the ring rather than carried over, so it moves
-whenever the ring or the swing does. Its one invariant is the author's: at the top
-of the pulse the fill clears the winner's own ring by exactly `CHOSEN_SEPARATION`.
-
-A circle appears on the frame after `pointerdown` — the same frame the original
-drew it on, because the original also mutated its map in the event handler and
-drew on the next `requestAnimationFrame`. Nothing is deferred, queued or
-throttled between a finger landing and its circle.
-
-The note below that looks like a caveat about speed is not: `reduced-motion` is
-about *whether* the pulse runs, not how fast, and the pulse's rate is the same in
-either case.
+The animation-frame loop is **one** `Closure` for the life of the page. A
+`requestAnimationFrame` callback that forgets a fresh `Closure` every frame leaks
+one JS function per frame. A circle appears on the frame after `pointerdown` --
+the same frame the original drew it on, because the original also mutated its map
+in the event handler and drew on the next `requestAnimationFrame`. Nothing is
+deferred, queued or throttled between a finger landing and its circle.
 
 ## The icon
 
@@ -186,23 +134,11 @@ cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 cargo test --locked
 ```
 
-- `src/chooser.rs` has 28 unit tests over the pointer state machine: add, move,
-  lift, cancel, the two-player minimum, every draw-timer restart rule, winner
-  selection and its anchoring, the 2000ms reset and its boundary, the pulse, the
-  winner-radius geometry and the colour formula. `tests/shell.rs` asserts the
-  file mentions no DOM crate at all.
-- `tests/shell.rs` (12 tests) asserts the invariants of the committed shell: the
-  page loads the generated bindings rather than a hand-written wasm ABI, exactly
-  one `<script>`, no absolute URLs, the original's viewport and
-  `touch-action: none` survive, exactly one `__VERSION__`, no `skipWaiting`,
-  `dist/` ignored, no build artefact tracked, the original `app.js`/`sw.js`/
-  `manifest.json`/`index.html` are gone, and every file the worker precaches is
-  published.
-
 There are no browser tests, no Node and no Chromium. `dist/` is gitignored, so
 the release gate's exported tree never has it; `.github/workflows/build.yml` runs
-both build steps on every push and then inspects the result — eight files, no
-strays, no unsubstituted `__VERSION__`, bindings that export.
+both build steps on every push and then inspects the result — told in full in
+that workflow. `tests/shell.rs` is the executable specification of the build's
+shape; read it.
 
 ## Code map
 
@@ -246,10 +182,9 @@ life of the page. A `requestAnimationFrame` callback that forgets a fresh
 
 - Offline needs one successful online visit over HTTPS or localhost. Browser
   cache eviction, or clearing site data, removes it.
-- The canvas is sized to `innerWidth`/`innerHeight` in CSS pixels, not scaled by
-  `devicePixelRatio` — the original's behaviour, kept so every radius here is a
-  CSS pixel and the picture is the picture the author shipped. On a
-  high-density screen it is drawn softer than the browser could.
+- The canvas is scaled by `devicePixelRatio` (capped at 3) and drawn through a
+  matching transform, but every radius here stays a CSS pixel, so the picture is
+  the picture the author shipped and no constant changed with the scaling.
 - `prefers-reduced-motion` is not honoured. This is a decision about *whether*
   the pulse runs, not about its speed — it runs at the original's 1500ms period
   either way. The pulse is the app, not decoration: it is how a player tells

@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! Chwazi, the finger chooser: the rules in Rust, the pixels in Rust, and a
 //! static HTML file that does nothing but load the wasm.
 //!

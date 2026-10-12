@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! The chooser: every pointer, the draw timer and the chosen player.
 //!
 //! This is the whole of Chwazi's behaviour, with no DOM, no clock and no canvas

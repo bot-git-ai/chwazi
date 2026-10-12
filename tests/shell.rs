@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! Invariants of the app shell source, and of what is and is not committed.
 //!
 //! Everything here reads committed files. `dist/` is build output and is
@@ -971,7 +968,11 @@ fn the_committed_icon_is_the_chwazi_brand_mark() {
         3,
         "three azure blue dots: the not-chosen ones"
     );
-    assert_eq!(icon.matches("<circle").count(), 4, "four flat dots, nothing else");
+    assert_eq!(
+        icon.matches("<circle").count(),
+        4,
+        "four flat dots, nothing else"
+    );
     // It is published, not just committed: the shell links it and the worker
     // precaches it, so `build.rs` has to copy it.
     assert!(

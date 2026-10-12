@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! Write the static app shell to `dist/` while the crate compiles.
 //!
 //! Chwazi is a browser application, so publishing it is a file write, not a

@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
 // Browser lifecycle/cache plumbing only; all chooser/app logic remains Rust.
 // An update waits for the old tabs to close rather than swapping the wasm under
 // one that is live, which for an app whose entire state is a single wasm module

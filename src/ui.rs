@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! The browser layer: events in, pixels out, [`crate::chooser`] in between.
 //!
 //! This file holds no rules. It translates pointer events into chooser calls,

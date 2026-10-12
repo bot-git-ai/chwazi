@@ -216,13 +216,32 @@ fn the_service_worker_template_has_exactly_one_placeholder() {
         worker.contains("new URL('./', self.location.href)"),
         "the worker must resolve its cache from its own location"
     );
-    // A `skipWaiting()` call would swap the wasm under a live tab, which for an
-    // app whose entire state is one wasm module means half old code drawing over
-    // half new code. Checked as a *call*, not as the bare word, so this file is
-    // still allowed to explain why it does not make one.
+    // An unprompted `skipWaiting()` would swap the wasm under a live tab, which
+    // for an app whose entire state is one wasm module means half old code
+    // drawing over half new code. The one allowed call is behind the page's
+    // `SKIP_WAITING` message: the ask comes from the page that immediately
+    // reloads as the worker takes over, so no client ever straddles the two
+    // versions. Asserted structurally — the call must sit inside the message
+    // handler, gated on the message — so an unconditional call cannot creep
+    // back in.
+    let handler = worker
+        .split("addEventListener('message'")
+        .nth(1)
+        .expect("the worker must listen for the page's handover message");
+    let handler = &handler[..handler.find("});").expect("the message handler closes")];
     assert!(
-        !worker.contains("skipWaiting("),
-        "an update must wait for the old tab to close"
+        handler.contains("event.data === 'SKIP_WAITING'") && handler.contains("skipWaiting()"),
+        "skipWaiting must be the worker's answer to the page's ask, never a call \
+         it makes on its own"
+    );
+    let code = strip_rust_comments(&worker);
+    let outside = code
+        .split("addEventListener('message'")
+        .next()
+        .expect("prefix");
+    assert!(
+        !outside.contains("skipWaiting("),
+        "no skipWaiting outside the message handler"
     );
     assert!(
         worker.contains("clients.claim()"),
@@ -281,6 +300,33 @@ fn the_page_states_the_scope_and_releases_a_wider_one() {
         ui.contains("get_registrations") && ui.contains("unregister"),
         "a stale wider registration survives a reload, a version bump and a \
          reinstall; only an explicit unregister clears it"
+    );
+}
+
+/// The page asks a newly installed worker in, and reloads as it takes over,
+/// instead of leaving the update waiting for a visit that never comes.
+///
+/// Without the ask, an installed copy only ever moves to a new version when
+/// every opening of it has closed — on a phone, possibly never. This pins
+/// both halves: the page's message, which the worker answers with
+/// `skipWaiting`, and the page's own reload on `controllerchange`.
+#[test]
+fn the_page_takes_an_installed_worker_over_with_a_reload() {
+    let code =
+        strip_rust_comments(&std::fs::read_to_string(root().join("src/ui.rs")).expect("src/ui.rs"));
+    assert!(
+        code.contains("registration.waiting()") && code.contains(".installing()"),
+        "the page must look at both workers an update can leave behind: one already \
+         installed and waiting, and one discovered while the page stands"
+    );
+    assert!(
+        code.contains("post_message(&JsValue::from_str(\"SKIP_WAITING\"))"),
+        "the handover starts with the page's message; the worker never swaps \
+         itself in unasked"
+    );
+    assert!(
+        code.contains("controllerchange") && code.contains("location().reload()"),
+        "and ends with the page reloading exactly as the worker takes over"
     );
 }
 

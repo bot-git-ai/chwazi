@@ -1,14 +1,17 @@
 <!-- Chwazi brand mark, flat variant: the 2x2 dot grid of the official app
-     icons (App Store proportions), without the 3D puck extrusion. Four flat
-     circles on a black tile, the top-left yellow (the chosen one) and the
-     other three azure blue. Geometry from the App Store icon: dot radius
-     50.6 at (256 plus or minus 103.3, 256 plus or minus 93.3). Colours are
-     user-chosen: azure blue #00a2ff for the three, clean yellow #ffea00 for
-     the chosen one. -->
+     icons (App Store proportions), without the 3D puck extrusion. Geometry
+     from the App Store icon: dot radius 50.6 at (256 plus or minus 103.3, 256
+     plus or minus 93.3).
+
+     One colour, `#606060`, on a transparent ground — the family's icon colour.
+     The mark's azure and yellow went with the rest of them: eight icons in eight
+     palettes read as eight unrelated apps. The black tile went too, so this sits
+     on the launcher's own surface like every sibling instead of being the one
+     opaque square in the set. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <rect width="512" height="512" fill="#000000"/>
-  <circle cx="152.7" cy="162.7" r="50.6" fill="#ffea00"/>
-  <circle cx="359.3" cy="162.7" r="50.6" fill="#00a2ff"/>
-  <circle cx="152.7" cy="349.3" r="50.6" fill="#00a2ff"/>
-  <circle cx="359.3" cy="349.3" r="50.6" fill="#00a2ff"/>
+  
+  <circle cx="152.7" cy="162.7" r="50.6" fill="#606060"/>
+  <circle cx="359.3" cy="162.7" r="50.6" fill="#606060"/>
+  <circle cx="152.7" cy="349.3" r="50.6" fill="#606060"/>
+  <circle cx="359.3" cy="349.3" r="50.6" fill="#606060"/>
 </svg>

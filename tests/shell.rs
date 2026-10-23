@@ -1034,25 +1034,22 @@ fn dist_is_ignored() {
 #[test]
 fn the_committed_icon_is_the_chwazi_brand_mark() {
     let icon = std::fs::read_to_string(root().join("assets/icon.svg")).expect("assets/icon.svg");
-    // The mark: a black tile with a 2x2 grid of four flat dots, the chosen one
-    // yellow and the other three blue, in the user-chosen colours.
+    // The mark: a 2x2 grid of four flat dots in one colour on a transparent
+    // ground. The brand's yellow-and-azure and its black tile went with the rest
+    // of the family's icon colours — eight icons in eight palettes read as eight
+    // unrelated apps — so what must survive is the *shape*.
     assert!(
         icon.contains("viewBox=\"0 0 512 512\""),
-        "the icon is a 512-unit tile"
+        "the icon is a 512-unit canvas"
     );
     assert!(
-        icon.contains("fill=\"#000000\""),
-        "the tile is black, edge to edge, like the app"
+        !icon.contains("fill=\"#000000\""),
+        "the icon is transparent: it sits on the launcher's surface, not on a tile"
     );
     assert_eq!(
-        icon.matches("fill=\"#ffea00\"").count(),
-        1,
-        "exactly one yellow dot: the chosen one"
-    );
-    assert_eq!(
-        icon.matches("fill=\"#00a2ff\"").count(),
-        3,
-        "three azure blue dots: the not-chosen ones"
+        icon.matches("fill=\"#606060\"").count(),
+        4,
+        "four dots in the family's one colour"
     );
     assert_eq!(
         icon.matches("<circle").count(),

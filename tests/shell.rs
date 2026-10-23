@@ -1047,7 +1047,7 @@ fn the_committed_icon_is_the_chwazi_brand_mark() {
         "the icon is transparent: it sits on the launcher's surface, not on a tile"
     );
     assert_eq!(
-        icon.matches("fill=\"#606060\"").count(),
+        icon.matches("fill=\"#444444\"").count(),
         4,
         "four dots in the family's one colour"
     );

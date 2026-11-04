@@ -21,10 +21,16 @@ serde_json = "1"
 # chooser is driven by unit tests with an explicit index, so `getrandom` is a
 # wasm-only dependency and is never compiled into a native build.
 getrandom = { version = "0.3", features = ["wasm_js"] }
-wasm-bindgen = "=0.2.128"
-wasm-bindgen-futures = "0.4.78"
-js-sys = "0.3.105"
-web-sys = { version = "0.3.105", features = [
+# A caret, not an exact pin: `wasm-bindgen-futures`, `js-sys` and `web-sys`
+# each depend on one exact `wasm-bindgen`, so `Cargo.lock` decides the version
+# whichever way this line is written, and an exact pin here would only be a
+# second copy of it to keep in step. The bindings generator must be that same
+# version -- a mismatch fails at load time in the browser, not at compile time
+# -- and the workflows read the version from the lock rather than naming it.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
   # The finger chooser needs none of the form controls the other apps do: its
   # entire interface is one canvas and the pointer events a phone sends it.
   "Window", "Document", "Element", "Event", "EventTarget",

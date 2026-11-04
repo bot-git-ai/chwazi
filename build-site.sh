@@ -20,7 +20,9 @@
 # is a wasm that predates the source sitting next to a fresh `index.html`. Run
 # this after every release.
 #
-# `wasm-bindgen` must be exactly the version pinned in Cargo.toml (0.2.128).
+# `wasm-bindgen` must be the version Cargo.lock records -- Cargo.toml asks for
+# "0.2", and the lock decides what that means. A generator from another version
+# writes bindings the runtime will not load, and the page fails to start.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

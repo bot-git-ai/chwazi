@@ -24,7 +24,9 @@ touch build.rs
 cargo build --release --locked
 ```
 
-`wasm-bindgen` must be exactly `0.2.128`, the version pinned in `Cargo.toml`.
+`Cargo.toml` asks for `wasm-bindgen = "0.2"` and `Cargo.lock` records the one
+version that means; the generator must be that version. A mismatch produces
+bindings the page will not load, and it fails with "Chwazi could not start".
 
 `dist/` is the whole publishable artifact: eight static files, no server and no
 binary. Serve it with anything — `python3 -m http.server` in `dist/` is enough.

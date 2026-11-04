@@ -1119,9 +1119,9 @@ fn the_crate_has_no_binary() {
         "the crate is a wasm module and a testable library"
     );
     assert!(
-        manifest.contains("wasm-bindgen = \"=0.2.128\""),
-        "the generator pin is exact: a mismatched one emits bindings the runtime \
-         will not load, and the page fails in a way that looks like an app bug"
+        manifest.contains("wasm-bindgen = \"0.2\""),
+        "wasm-bindgen must be asked for as a caret; the lock decides the version, and a \
+         mismatch with the generator emits bindings the runtime will not load"
     );
     assert!(
         manifest.contains("features = [\"wasm_js\"]"),
@@ -1182,64 +1182,51 @@ fn strip_yaml_comments(source: &str) -> String {
         .join("\n")
 }
 
-/// The Pages deployment cannot drift from the crate it publishes.
+/// The generator version must be the lockfile's, and nothing may restate it.
 ///
-/// The deploy job installs its own `wasm-bindgen`, pinned to a literal in the
-/// YAML, and compares its digest against a second literal in the same file.
-/// `Cargo.toml` pins the same version the crate compiles against. Move the
-/// dependency and the workflow keeps building happily: it generates bindings
-/// for a runtime the page does not have, and the only symptom is a live site
-/// that fails at startup with "Chwazi could not start" -- for every visitor,
-/// and only in the browser.
+/// `Cargo.toml` asks for `wasm-bindgen = "0.2"`; the exact version is decided by
+/// `Cargo.lock`, and it is written down in exactly one place because
+/// `wasm-bindgen-futures`, `js-sys` and `web-sys` each depend on one exact
+/// `wasm-bindgen`. The generator has to be that same version: a mismatched one
+/// emits bindings the runtime will not load, and the only symptom is a live site
+/// that fails at startup with "Chwazi could not start" -- for every visitor, and
+/// only in the browser.
+///
+/// So neither workflow may name a version. A literal there is a second copy of a
+/// fact the lock records, wrong from the next `cargo update` onward, and silent
+/// when it is. Read from the lock and there is nothing to keep in step.
 #[test]
-fn the_pages_build_generates_bindings_for_the_pinned_runtime() {
-    let Some(pages) = workflow("pages.yml") else {
-        return;
-    };
-    let live = strip_yaml_comments(&pages);
+fn both_workflows_take_the_generator_version_from_the_lockfile() {
     let manifest = std::fs::read_to_string(root().join("Cargo.toml")).expect("Cargo.toml");
-
-    // Read the pin as Cargo writes it: `wasm-bindgen = "=0.2.128"`, an exact
-    // requirement. A looser form ("0.2.128", "^0.2") would resolve to whatever
-    // is newest in the lockfile, and the workflow's literal would then be
-    // naming one arbitrary version of several.
-    let pin = manifest
-        .lines()
-        .find_map(|line| {
-            let rest = line.trim().strip_prefix("wasm-bindgen")?;
-            let rest = rest.trim_start().strip_prefix('=')?;
-            Some(rest.trim().trim_matches('"').to_owned())
-        })
-        .unwrap_or_else(|| panic!("Cargo.toml pins no exact wasm-bindgen version"));
     assert!(
-        pin.starts_with('='),
-        "Cargo.toml must pin wasm-bindgen exactly ({pin:?})",
-    );
-    let version = pin.trim_start_matches('=').trim_matches('"');
-
-    // The `env:` block must exist and must declare the version at that same
-    // literal. `version="$WASM_BINDGEN_VERSION"` with the variable undeclared
-    // expands to nothing, the generator step installs nothing, and every other
-    // check in the job still passes -- so this is asserted separately rather
-    // than inferred from the install step mentioning the variable.
-    assert!(
-        live.contains("\nenv:"),
-        "pages.yml must have a top-level `env:` block; the generator version is declared there",
-    );
-    let declared = format!("WASM_BINDGEN_VERSION: {version}");
-    assert!(
-        live.contains(&declared),
-        "pages.yml must declare `{declared}`, matching the Cargo.toml pin; an undeclared \
-         variable expands to nothing and the step installs no generator at all",
+        manifest
+            .lines()
+            .any(|line| line.trim() == "wasm-bindgen = \"0.2\""),
+        "Cargo.toml must ask for `wasm-bindgen = \"0.2\"`; an exact pin here would be a second \
+         copy of the version the lockfile and the sibling crates already decide",
     );
 
-    // And the version must reach the job that runs the generator, not merely
-    // sit in `env:` where nothing reads it.
-    assert!(
-        live.contains("version=\"$WASM_BINDGEN_VERSION\""),
-        "the install step must use the declared variable (`version=\"$WASM_BINDGEN_VERSION\"`) \
-         or the literal; a declared-but-unused version pins nothing",
-    );
+    for name in ["build.yml", "pages.yml"] {
+        let Some(text) = workflow(name) else {
+            panic!("{name} must exist");
+        };
+        assert!(
+            text.contains("version=\"$(awk"),
+            "{name} must derive the generator version from Cargo.lock rather than naming one",
+        );
+        assert!(
+            text.contains("Cargo.lock"),
+            "{name} must read Cargo.lock for the generator version",
+        );
+        assert!(
+            !text.contains("WASM_BINDGEN_VERSION"),
+            "{name} must not declare a generator version of its own; Cargo.lock has it",
+        );
+        assert!(
+            !text.contains("version=\"0.2"),
+            "{name} must not name a generator version literal",
+        );
+    }
 }
 
 /// Chwazi must not set `web_sys_unstable_apis`, and this is the one workflow
